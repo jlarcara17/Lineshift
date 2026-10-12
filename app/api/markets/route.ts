@@ -17,11 +17,16 @@ type PolymarketMarket = {
   volume?: string | number;
   active?: boolean;
   closed?: boolean;
+  groupItemTitle?: string;
+  sportsMarketType?: string;
+  line?: number | string;
 };
 
 type PolymarketEvent = {
   id?: string | number;
   title?: string;
+  slug?: string;
+  startDate?: string;
   markets?: PolymarketMarket[];
 };
 
@@ -45,9 +50,53 @@ function parseArray(value: unknown): string[] {
   return [];
 }
 
+function classifyMarket(market: PolymarketMarket): string {
+  const question = (market.question || '').toLowerCase();
+  const type = (market.sportsMarketType || '').toLowerCase();
+
+  if (
+    type.includes('moneyline') ||
+    question.includes('moneyline') ||
+    question.includes('winner')
+  ) {
+    return 'Moneyline';
+  }
+
+  if (
+    type.includes('spread') ||
+    question.includes('spread') ||
+    /[+-]\d+\.5/.test(question)
+  ) {
+    return 'Spreads';
+  }
+
+  if (
+    type.includes('total') ||
+    question.includes('total points') ||
+    question.includes('over/under')
+  ) {
+    return 'Totals';
+  }
+
+  if (
+    question.includes('passing yards') ||
+    question.includes('rushing yards') ||
+    question.includes('receiving yards') ||
+    question.includes('touchdown') ||
+    type.includes('player')
+  ) {
+    return 'Player Props';
+  }
+
+  return 'Other';
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const league = (url.searchParams.get('league') || 'NFL').toUpperCase();
+
+  const league = (
+    url.searchParams.get('league') || 'NFL'
+  ).toUpperCase();
 
   if (!/^[A-Z0-9]{2,12}$/.test(league)) {
     return NextResponse.json(
@@ -103,9 +152,15 @@ export async function GET(request: Request) {
 
           return {
             marketId: `polymarket:${market.id}`,
+            eventId: String(event.id || ''),
+            eventName: event.title || 'Unknown matchup',
+            eventSlug: event.slug || '',
+            startDate: event.startDate || null,
             name: market.question || event.title || 'Untitled market',
-            eventName: event.title || market.question,
-            marketType: 'Prediction Market',
+            marketType: classifyMarket(market),
+            sportsMarketType: market.sportsMarketType || null,
+            line: market.line ?? null,
+            groupItemTitle: market.groupItemTitle || null,
             source: 'Polymarket',
             volume: market.volume,
             outcomes: outcomes.map((name, index) => {
