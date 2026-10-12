@@ -4,6 +4,9 @@ export const dynamic = "force-dynamic";
 
 const KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2";
 
+// NFL game-winner markets
+const NFL_SERIES = "KXNFLGAME";
+
 type KalshiMarket = {
   ticker: string;
   event_ticker: string;
@@ -16,7 +19,6 @@ type KalshiMarket = {
   yes_ask?: number;
   yes_bid_dollars?: string;
   yes_ask_dollars?: string;
-  last_price?: number;
   volume?: number;
   close_time?: string;
 };
@@ -26,16 +28,24 @@ type KalshiResponse = {
   cursor?: string;
 };
 
-function getPrice(dollars?: string, cents?: number): number | null {
-  if (dollars !== undefined) {
+function getPrice(
+  dollars?: string,
+  cents?: number
+): number | null {
+  if (dollars !== undefined && dollars !== "") {
     const price = Number(dollars);
-    return Number.isFinite(price) && price >= 0 && price <= 1
+
+    return Number.isFinite(price) &&
+      price >= 0 &&
+      price <= 1
       ? price
       : null;
   }
 
   if (typeof cents === "number") {
-    return cents >= 0 && cents <= 100 ? cents / 100 : null;
+    return cents >= 0 && cents <= 100
+      ? cents / 100
+      : null;
   }
 
   return null;
@@ -43,48 +53,75 @@ function getPrice(dollars?: string, cents?: number): number | null {
 
 export async function GET() {
   try {
-    const endpoint =
-      `${KALSHI_API}/markets?` +
-      new URLSearchParams({
+    const allMarkets: KalshiMarket[] = [];
+    let cursor = "";
+    let pagesFetched = 0;
+
+    // Retrieve NFL markets directly, including additional pages.
+    do {
+      const params = new URLSearchParams({
+        series_ticker: NFL_SERIES,
         status: "open",
         limit: "1000",
-      }).toString();
+      });
 
-    const response = await fetch(endpoint, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(12000),
-    });
+      if (cursor) {
+        params.set("cursor", cursor);
+      }
 
-    if (!response.ok) {
-      throw new Error(`Kalshi returned ${response.status}`);
-    }
+      const response = await fetch(
+        `${KALSHI_API}/markets?${params.toString()}`,
+        {
+          cache: "no-store",
+          signal: AbortSignal.timeout(10000),
+        }
+      );
 
-    const data: KalshiResponse = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          `Kalshi returned ${response.status}`
+        );
+      }
 
-    const markets = (data.markets || [])
-      .filter((market) => market.ticker.startsWith("KXNFL"))
-      .map((market) => ({
-        marketId: `kalshi:${market.ticker}`,
-        eventId: market.event_ticker,
-        name: market.title,
-        subtitle: market.subtitle || null,
-        yesSubtitle: market.yes_sub_title || null,
-        noSubtitle: market.no_sub_title || null,
-        source: "Kalshi",
-        status: market.status,
-        yesBid: getPrice(market.yes_bid_dollars, market.yes_bid),
-        yesAsk: getPrice(market.yes_ask_dollars, market.yes_ask),
-        volume: market.volume ?? null,
-        closeTime: market.close_time || null,
-      }));
+      const data: KalshiResponse = await response.json();
+
+      allMarkets.push(...(data.markets || []));
+
+      cursor = data.cursor || "";
+      pagesFetched++;
+
+      // Safety limit to avoid excessive API requests.
+    } while (cursor && pagesFetched < 5);
+
+    const markets = allMarkets.map((market) => ({
+      marketId: `kalshi:${market.ticker}`,
+      eventId: market.event_ticker,
+      ticker: market.ticker,
+      name: market.title,
+      subtitle: market.subtitle || null,
+      yesSubtitle: market.yes_sub_title || null,
+      noSubtitle: market.no_sub_title || null,
+      source: "Kalshi",
+      status: market.status,
+      yesBid: getPrice(
+        market.yes_bid_dollars,
+        market.yes_bid
+      ),
+      yesAsk: getPrice(
+        market.yes_ask_dollars,
+        market.yes_ask
+      ),
+      volume: market.volume ?? null,
+      closeTime: market.close_time || null,
+    }));
 
     return NextResponse.json({
       markets,
       count: markets.length,
+      pagesFetched,
       updatedAt: new Date().toISOString(),
       source: "Kalshi",
-      note:
-        "Initial NFL market discovery. Market matching and pagination will be added after verifying the response.",
+      series: NFL_SERIES,
     });
   } catch (error) {
     return NextResponse.json(
