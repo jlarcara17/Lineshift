@@ -36,6 +36,7 @@ type Market = {
   eventName?: string;
   eventSlug?: string;
   startDate?: string | null;
+  gameStartTime?: string | null;
   name?: string;
   title?: string;
   marketType?: string;
@@ -64,16 +65,30 @@ type Signal = {
 type Game = {
   id: string;
   name: string;
+  kickoff: string | null;
   markets: Market[];
 };
 
-type Category = 'Moneyline' | 'Spreads' | 'Totals' | 'Player Props' | 'Other';
+type Category =
+  | 'Moneyline'
+  | 'Spreads'
+  | 'Totals'
+  | 'Player Props'
+  | 'Other';
 
 const historyKey = 'lineshift-history-v1';
 const picksKey = 'lineshift-weekly-picks-v1';
 const watchKey = 'lineshift-watch';
 
-const leagues = ['NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAAB', 'EPL'];
+const leagues = [
+  'NFL',
+  'NBA',
+  'MLB',
+  'NHL',
+  'NCAAF',
+  'NCAAB',
+  'EPL',
+];
 
 const categories: Category[] = [
   'Moneyline',
@@ -119,6 +134,29 @@ function gameName(market: Market): string {
   return market.eventName || marketName(market);
 }
 
+function kickoffTimestamp(value: string | null | undefined): number {
+  if (!value) return Infinity;
+
+  const timestamp = Date.parse(value);
+
+  return Number.isFinite(timestamp) ? timestamp : Infinity;
+}
+
+function formatKickoff(value: string | null | undefined): string {
+  if (!value || !Number.isFinite(Date.parse(value))) {
+    return 'Kickoff time unavailable';
+  }
+
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(new Date(value));
+}
+
 function marketCategory(market: Market): Category {
   const type = (market.marketType || '').toLowerCase();
   const sportsType = (market.sportsMarketType || '').toLowerCase();
@@ -145,7 +183,7 @@ function marketCategory(market: Market): Category {
   if (
     type.includes('total') ||
     sportsType.includes('total') ||
-    /total points|over\/under|combined points/.test(question)
+    /total points|over\/under|combined points|o\/u/.test(question)
   ) {
     return 'Totals';
   }
@@ -168,27 +206,42 @@ function groupGames(markets: Market[]): Game[] {
   for (const market of markets) {
     const name = gameName(market);
 
-    // Prefer the event's stable ID so similarly named games remain separate.
     const id = market.eventId
       ? `event:${market.eventId}`
-      : `name:${name.toLowerCase().trim()}`;
+      : market.eventSlug
+        ? `slug:${market.eventSlug}`
+        : `name:${name.toLowerCase().trim()}`;
 
     const existing = groups.get(id);
 
     if (existing) {
       existing.markets.push(market);
+
+      if (
+        kickoffTimestamp(market.gameStartTime) <
+        kickoffTimestamp(existing.kickoff)
+      ) {
+        existing.kickoff = market.gameStartTime || null;
+      }
     } else {
       groups.set(id, {
         id,
         name,
+        kickoff: market.gameStartTime || null,
         markets: [market],
       });
     }
   }
 
-  return Array.from(groups.values()).sort(
-    (a, b) => b.markets.length - a.markets.length
-  );
+  return Array.from(groups.values()).sort((a, b) => {
+    const difference =
+      kickoffTimestamp(a.kickoff) - kickoffTimestamp(b.kickoff);
+
+    if (Number.isNaN(difference)) return 0;
+    if (difference !== 0) return difference;
+
+    return a.name.localeCompare(b.name);
+  });
 }
 
 function buildSignals(
@@ -247,14 +300,18 @@ function buildSignals(
 export default function Home() {
   const [history, setHistory] = useState<History>({});
   const [picks, setPicks] = useState<Signal[]>([]);
-  const [view, setView] = useState<'markets' | 'signals' | 'picks'>('markets');
+  const [view, setView] = useState<'markets' | 'signals' | 'picks'>(
+    'markets'
+  );
   const [league, setLeague] = useState('NFL');
   const [query, setQuery] = useState('');
   const [markets, setMarkets] = useState<Market[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [updated, setUpdated] = useState('');
-  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(
+    null
+  );
   const [category, setCategory] = useState<Category>('Moneyline');
   const [watch, setWatch] = useState<string[]>([]);
   const [onlyWatch, setOnlyWatch] = useState(false);
@@ -612,7 +669,7 @@ export default function Home() {
                 {loading ? '…' : games.length.toLocaleString()}
               </div>
               <div className="statfoot">
-                Grouped {league} events
+                Upcoming {league} events
               </div>
             </div>
 
@@ -849,7 +906,7 @@ export default function Home() {
                     <table>
                       <thead>
                         <tr>
-                          <th>MATCHUP</th>
+                          <th>MATCHUP / KICKOFF</th>
                           <th>AVAILABLE CONTRACTS</th>
                           <th>MARKET TYPES</th>
                           <th>EXCHANGE</th>
@@ -875,6 +932,17 @@ export default function Home() {
                                 <div className="marketname">
                                   {game.name}
                                 </div>
+
+                                <div
+                                  className="marketid"
+                                  style={{
+                                    color: '#b6f36c',
+                                    marginTop: 8,
+                                  }}
+                                >
+                                  {formatKickoff(game.kickoff)}
+                                </div>
+
                                 <div className="marketid">
                                   Click to explore markets →
                                 </div>
@@ -912,7 +980,7 @@ export default function Home() {
                         <h3>
                           {error
                             ? 'No live data'
-                            : 'No matching games'}
+                            : 'No upcoming games found'}
                         </h3>
                         <p>
                           {error
@@ -928,7 +996,7 @@ export default function Home() {
                           size={25}
                           className="spin"
                         />
-                        <p>Loading matchups…</p>
+                        <p>Loading upcoming matchups…</p>
                       </div>
                     )}
                   </div>
@@ -950,6 +1018,10 @@ export default function Home() {
                       </div>
 
                       <h2>{selectedGame.name}</h2>
+
+                      <p className="muted">
+                        {formatKickoff(selectedGame.kickoff)}
+                      </p>
 
                       <p className="muted">
                         {selectedGame.markets.length} available
@@ -995,7 +1067,8 @@ export default function Home() {
 
                       <tbody>
                         {selectedMarkets.map((market, index) => {
-                          const id = marketId(market) || String(index);
+                          const id =
+                            marketId(market) || String(index);
 
                           return (
                             <tr key={id}>
@@ -1061,9 +1134,7 @@ export default function Home() {
                       <div className="empty">
                         <BarChart3 size={30} />
                         <h3>No contracts in this category</h3>
-                        <p>
-                          Try another market type.
-                        </p>
+                        <p>Try another market type.</p>
                       </div>
                     )}
                   </div>
