@@ -1,57 +1,1096 @@
 'use client';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, CircleHelp, ExternalLink, RefreshCw, Search, ShieldCheck, TrendingUp, Wifi, WifiOff } from 'lucide-react';
 
-type Tick = {at:number;prob:number};
-type History = Record<string,Tick[]>;
-type Signal = {id:string;label:string;outcome:string;league:string;opening:number;current:number;change:number;observations:number;score:number;at:number};
-const historyKey='lineshift-history-v1';
-const picksKey='lineshift-weekly-picks-v1';
-function numericProbability(raw:unknown):number|null {
- if(raw===null||raw===undefined||raw==='')return null;
- const n=Number(raw);
- return Number.isFinite(n)&&n>=0&&n<=1?n:null;
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  ArrowLeft,
+  BarChart3,
+  CircleHelp,
+  ExternalLink,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  TrendingUp,
+  Wifi,
+  WifiOff,
+} from 'lucide-react';
+
+type Tick = {
+  at: number;
+  prob: number;
+};
+
+type History = Record<string, Tick[]>;
+
+type Outcome = {
+  outcomeId?: string;
+  name?: string;
+  label?: string;
+  price?: string | number | null;
+};
+
+type Market = {
+  marketId?: string;
+  id?: string;
+  eventId?: string;
+  eventName?: string;
+  eventSlug?: string;
+  startDate?: string | null;
+  name?: string;
+  title?: string;
+  marketType?: string;
+  sportsMarketType?: string | null;
+  line?: number | string | null;
+  groupItemTitle?: string | null;
+  source?: string;
+  outcomes?: Outcome[];
+  volume?: string | number;
+  status?: string;
+};
+
+type Signal = {
+  id: string;
+  label: string;
+  outcome: string;
+  league: string;
+  opening: number;
+  current: number;
+  change: number;
+  observations: number;
+  score: number;
+  at: number;
+};
+
+type Game = {
+  id: string;
+  name: string;
+  markets: Market[];
+};
+
+type Category = 'Moneyline' | 'Spreads' | 'Totals' | 'Player Props' | 'Other';
+
+const historyKey = 'lineshift-history-v1';
+const picksKey = 'lineshift-weekly-picks-v1';
+const watchKey = 'lineshift-watch';
+
+const leagues = ['NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAAB', 'EPL'];
+
+const categories: Category[] = [
+  'Moneyline',
+  'Spreads',
+  'Totals',
+  'Player Props',
+  'Other',
+];
+
+function numericProbability(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  const value = Number(raw);
+
+  return Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : null;
 }
-function buildSignals(markets:Market[],history:History,league:string):Signal[]{
- const signals:Signal[]=[];
- for(const m of markets){const mid=String(m.marketId||m.id||'');if(!mid)continue;
-  for(const [index,o] of (m.outcomes||[]).entries()){
-   const id=`${league}:${mid}:${o.outcomeId||index}`;const ticks=history[id]||[];
-   if(ticks.length<2||ticks[ticks.length-1].at-ticks[0].at<60000)continue;
-   const opening=ticks[0].prob,current=ticks[ticks.length-1].prob;
-   const change=(current-opening)*100;
-   if(Math.abs(change)<0.5||current<1/3||current>0.85)continue;
-   signals.push({id,label:label(m),outcome:o.name||o.label||`Outcome ${index+1}`,league,opening,current,change,observations:ticks.length,score:Math.abs(change),at:ticks[ticks.length-1].at});
+
+function price(raw: unknown): string {
+  const value = numericProbability(raw);
+
+  return value === null ? '—' : `${(value * 100).toFixed(1)}%`;
+}
+
+function money(raw: unknown): string {
+  const value = Number(raw);
+
+  return Number.isFinite(value) && value > 0
+    ? '$' + value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+    : '—';
+}
+
+function marketId(market: Market): string {
+  return String(market.marketId || market.id || '');
+}
+
+function marketName(market: Market): string {
+  return market.name || market.title || 'Untitled market';
+}
+
+function gameName(market: Market): string {
+  return market.eventName || marketName(market);
+}
+
+function marketCategory(market: Market): Category {
+  const type = (market.marketType || '').toLowerCase();
+  const sportsType = (market.sportsMarketType || '').toLowerCase();
+  const question = marketName(market).toLowerCase();
+
+  if (
+    type.includes('player') ||
+    sportsType.includes('player') ||
+    /passing yards|rushing yards|receiving yards|receptions|anytime touchdown|first touchdown|player to score/.test(
+      question
+    )
+  ) {
+    return 'Player Props';
   }
- }
- return signals.sort((a,b)=>b.score-a.score);
+
+  if (
+    type.includes('spread') ||
+    sportsType.includes('spread') ||
+    question.includes('spread')
+  ) {
+    return 'Spreads';
+  }
+
+  if (
+    type.includes('total') ||
+    sportsType.includes('total') ||
+    /total points|over\/under|combined points/.test(question)
+  ) {
+    return 'Totals';
+  }
+
+  if (
+    type.includes('moneyline') ||
+    sportsType.includes('moneyline') ||
+    question.includes('moneyline') ||
+    question.includes('winner')
+  ) {
+    return 'Moneyline';
+  }
+
+  return 'Other';
 }
-type Outcome = {outcomeId?:string;name?:string;label?:string;price?:string|number};
-type Market = {marketId?:string;id?:string;name?:string;title?:string;marketType?:string;eventName?:string;event?:{name?:string;title?:string};outcomes?:Outcome[];volume?:string|number;status?:string};
-const leagues=['NFL','NBA','MLB','NHL','NCAAF','NCAAB','EPL'];
-const money = (v:unknown) => {const n=Number(v);return Number.isFinite(n)&&n>0?'$'+n.toLocaleString(undefined,{maximumFractionDigits:0}):'—'};
-function price(v:unknown) {const n=Number(v);return v!==undefined&&v!==null&&v!==''&&Number.isFinite(n)&&n>=0&&n<=1?`${(n*100).toFixed(1)}%`:'—'}
-function label(m:Market) {return m.eventName||m.event?.name||m.event?.title||m.title||m.name||'Untitled market'}
-export default function Home(){
- const [history,setHistory]=useState<History>({});const [picks,setPicks]=useState<Signal[]>([]);const [view,setView]=useState<'markets'|'signals'|'picks'>('markets');const [league,setLeague]=useState('NFL');const [query,setQuery]=useState('');const [markets,setMarkets]=useState<Market[]>([]);const [loading,setLoading]=useState(true);const [error,setError]=useState('');const [updated,setUpdated]=useState('');const [selected,setSelected]=useState<Market|null>(null);const [watch,setWatch]=useState<string[]>([]);const [onlyWatch,setOnlyWatch]=useState(false);
- useEffect(()=>{try{setWatch(JSON.parse(localStorage.getItem('lineshift-watch')||'[]'));setHistory(JSON.parse(localStorage.getItem(historyKey)||'{}'));setPicks(JSON.parse(localStorage.getItem(picksKey)||'[]'))}catch{}},[]);
- const load=useCallback(async()=>{setLoading(true);try{const r=await fetch(`/api/markets?league=${league}`,{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Unable to load markets');setMarkets(d.markets||[]);setUpdated(d.updatedAt);
- setHistory(prev=>{
- const next:History={...prev};const now=Date.now();
- for(const m of (d.markets||[]) as Market[]){const mid=String(m.marketId||m.id||'');if(!mid)continue;
- for(const [i,o] of (m.outcomes||[]).entries()){
- const prob=numericProbability(o.price);if(prob===null)continue;
- const id=`${league}:${mid}:${o.outcomeId||i}`;const old=next[id]||[];
- if(!old.length||old[old.length-1].prob!==prob||now-old[old.length-1].at>=60000)next[id]=[...old,{at:now,prob}].slice(-500);
- }}
- try{localStorage.setItem(historyKey,JSON.stringify(next))}catch{}
- return next;
- });setError('')}catch(e){setMarkets([]);setError(e instanceof Error?e.message:'Connection error')}finally{setLoading(false)}},[league]);
- useEffect(()=>{load();const id=setInterval(load,60000);return()=>clearInterval(id)},[load]);
- const signals=useMemo(()=>buildSignals(markets,history,league),[markets,history,league]);
- const shown=useMemo(()=>markets.filter(m=>(label(m)+' '+(m.marketType||'')+' '+(m.outcomes||[]).map(o=>o.name||o.label).join(' ')).toLowerCase().includes(query.toLowerCase())).filter(m=>!onlyWatch||watch.includes(String(m.marketId||m.id))),[markets,query,onlyWatch,watch]);
- function publish(){const selected=signals.filter(s=>s.change>0).slice(0,5);setPicks(selected);localStorage.setItem(picksKey,JSON.stringify(selected));setView('picks')}
- function exportPicks(){const payload={source:'LineShift',generatedAt:new Date().toISOString(),method:'positive price movement; candidates only, not recommendations',picks};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='lineshift-weekly-hot-picks.json';a.click();URL.revokeObjectURL(a.href)}
- function toggle(id:string){const next=watch.includes(id)?watch.filter(x=>x!==id):[...watch,id];setWatch(next);localStorage.setItem('lineshift-watch',JSON.stringify(next))}
- return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brandmark"><Activity size={23}/></div><div>LINE<span>SHIFT</span><small>SPORTS MARKET INTELLIGENCE</small></div></div><div className="navlabel">WORKSPACE</div><button className={'navitem '+(view==='markets'?'active':'')} onClick={()=>setView('markets')}><BarChart3 size={18}/> Market Overview</button><button className={'navitem '+(view==='signals'?'active':'')} onClick={()=>setView('signals')}><Activity size={18}/> Line Movement <b>{signals.length}</b></button><button className={'navitem '+(view==='picks'?'active':'')} onClick={()=>setView('picks')}><TrendingUp size={18}/> Weekly Hot Picks <b>{picks.length}</b></button><button className={'navitem '+(onlyWatch?'active':'')} onClick={()=>setOnlyWatch(!onlyWatch)}><TrendingUp size={18}/> Watchlist <b>{watch.length}</b></button><div className="navlabel second">DATA SOURCE</div><div className="source"><span className={'dot '+(error?'red':'')}/><div>Novig Public API<small>{error?'Unavailable':'Read-only connection'}</small></div></div><div className="sidebottom"><ShieldCheck size={18}/><span>Market data only<br/><small>No trades or account access</small></span></div></aside><main className="main"><header className="top"><div className="crumb">WORKSPACE <span>/</span> MARKET OVERVIEW</div><div className="topright"><span className="live"><span className={'dot '+(error?'red':'')}/>{error?'OFFLINE':'LIVE DATA'}</span><a href="https://docs.novig.com" target="_blank" rel="noreferrer">API Docs <ExternalLink size={13}/></a></div></header><div className="content"><div className="heading"><div><div className="eyebrow">TRACK THE LINES. SPOT THE SHIFTS.</div><h1>LineShift Overview<span className="headingdot">.</span></h1><p>Explore prediction markets, compare implied probabilities, and track the contracts that matter.</p></div><button className="refresh" onClick={load} disabled={loading}><RefreshCw size={16} className={loading?'spin':''}/> Refresh Data</button></div><section className="stats"><div className="stat"><div className="stathead">AVAILABLE MARKETS <BarChart3 size={18}/></div><div className="statvalue">{loading?'…':markets.length.toLocaleString()}</div><div className="statfoot">Current {league} feed</div></div><div className="stat"><div className="stathead">WATCHLIST <TrendingUp size={18}/></div><div className="statvalue">{watch.length}</div><div className="statfoot">Saved in this browser</div></div><div className="stat"><div className="stathead">DATA CONNECTION {error?<WifiOff size={18}/>:<Wifi size={18}/>}</div><div className="statvalue smaller">{error?'Unavailable':'Connected'}</div><div className="statfoot">Refreshes every 60 seconds</div></div><div className="stat"><div className="stathead">TRADING MODE <ShieldCheck size={18}/></div><div className="statvalue smaller">Read Only</div><div className="statfoot">Verify API availability</div></div></section>{view==='signals'&&<section className="panel signalpanel"><div className="panelhead"><div><div className="eyebrow">PRICE MOVEMENT ENGINE</div><h2>LineShift Signals <span className="count">{signals.length}</span></h2></div><button className="refresh" onClick={publish} disabled={!signals.some(s=>s.change>0)}>Select Top 5 Hot Picks</button></div><p className="signalintro">Observed changes since this browser started collecting prices. A positive move means implied probability increased, not that the contract is a good bet. Requires at least two observations a minute apart.</p><div className="signalgrid">{signals.map(s=><div className="signalcard" key={s.id}><div className="eyebrow">{s.league} · {s.observations} observations</div><h3>{s.label}</h3><div className="muted">{s.outcome}</div><div className="signalnumbers"><span>{(s.opening*100).toFixed(1)}% → {(s.current*100).toFixed(1)}%</span><strong className={s.change>=0?'positive':'negative'}>{s.change>0?'+':''}{s.change.toFixed(1)} pp</strong></div></div>)}{!signals.length&&<div className="signalempty">No qualified movements yet. Keep the dashboard open while market data refreshes. Markets must expose usable prices, and changes must be observed over time.</div>}</div></section>}{view==='picks'&&<section className="panel signalpanel"><div className="panelhead"><div><div className="eyebrow">WEEKLY PARLAY INTEGRATION</div><h2>Weekly Hot Picks <span className="count">{picks.length}/5</span></h2></div><button className="refresh" disabled={!picks.length} onClick={exportPicks}>Export JSON</button></div><p className="signalintro">These are line-movement candidates saved in this browser, not verified betting recommendations. Review market type, eligibility, liquidity, and current odds before adding them to Weekly Parlay. Nothing is automatically published.</p><div className="signalgrid">{picks.map((s,i)=><div className="signalcard" key={s.id}><div className="eyebrow">PICK {i+1} · {s.league}</div><h3>{s.label}</h3><div className="muted">{s.outcome}</div><div className="signalnumbers"><span>{(s.current*100).toFixed(1)}% implied</span><strong className="positive">+{s.change.toFixed(1)} pp</strong></div></div>)}{!picks.length&&<div className="signalempty">No Hot Picks selected. Open Line Movement and choose “Select Top 5 Hot Picks” after valid signals appear.</div>}</div></section>}{view==='markets'&&<section className="panel"><div className="panelhead"><div><div className="eyebrow">MARKET EXPLORER</div><h2>Explore Contracts <span className="count">{shown.length}</span></h2></div><div className="last">{updated?'Last updated '+new Date(updated).toLocaleTimeString():'Waiting for feed'}</div></div><div className="filters"><div className="leagues">{leagues.map(l=><button key={l} className={league===l?'chosen':''} onClick={()=>{setLeague(l);setSelected(null)}}>{l}</button>)}</div><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search markets or teams"/></div></div>{error&&<div className="error"><CircleHelp size={18}/><div><strong>Live feed temporarily unavailable.</strong><div>{error}. The dashboard never substitutes fabricated prices.</div></div></div>}<div className="tablewrap"><table><thead><tr><th>EVENT / MARKET</th><th>TYPE</th><th>OUTCOMES & IMPLIED PROBABILITY</th><th>VOLUME</th><th>TRACK</th></tr></thead><tbody>{shown.map((m,i)=>{const id=String(m.marketId||m.id||i);return <tr key={id} onClick={()=>setSelected(m)}><td><div className="marketname">{label(m)}</div><div className="marketid">{id.length>30?id.slice(0,26)+'…':id}</div></td><td><span className="badge">{m.marketType||'MARKET'}</span></td><td><div className="outcomes">{(m.outcomes||[]).slice(0,2).map((o,j)=><span key={j} className="outcome">{o.name||o.label||`Outcome ${j+1}`} <strong>{price(o.price)}</strong></span>)}{!(m.outcomes||[]).length&&<span className="muted">View order book for prices</span>}</div></td><td className="volume">{money(m.volume)}</td><td><button className={'star '+(watch.includes(id)?'saved':'')} onClick={e=>{e.stopPropagation();toggle(id)}} title="Toggle watchlist">{watch.includes(id)?'★':'☆'}</button></td></tr>})}</tbody></table>{!loading&&!shown.length&&<div className="empty"><BarChart3 size={30}/><h3>{error?'No live data':'No matching markets'}</h3><p>{error?'Try refreshing later or verify API availability.':'Try another league or clear your search.'}</p></div>}{loading&&<div className="empty"><RefreshCw size={25} className="spin"/><p>Loading live market catalog…</p></div>}</div><div className="panelbottom"><span>Source: Novig public market catalog · Read-only</span><span>Prices are shown only when supplied by the API</span></div></section>}<div className="disclaimer">LineShift is an independent demo dashboard and is not affiliated with Novig. Implied probabilities are not guaranteed outcomes. This application does not place trades or provide financial advice.</div></div></main>{selected&&<div className="overlay" onClick={()=>setSelected(null)}><div className="drawer" onClick={e=>e.stopPropagation()}><button className="close" onClick={()=>setSelected(null)}>✕</button><div className="eyebrow">MARKET DETAILS</div><h2>{label(selected)}</h2><p className="muted">{selected.marketType||'Sports contract'} · {league}</p><div className="divider"/><h3>Listed outcomes</h3>{(selected.outcomes||[]).length?(selected.outcomes||[]).map((o,i)=><div className="detailrow" key={i}><span>{o.name||o.label||`Outcome ${i+1}`}</span><strong>{price(o.price)}</strong></div>):<p className="muted">This catalog response does not include live executable prices. Order-book integration is a next step.</p>}<div className="divider"/><p className="muted">Market ID</p><code className="idcode">{selected.marketId||selected.id||'Not supplied'}</code><div className="drawerfoot">Read-only market information. No orders can be placed.</div></div></div>}</div>
+
+function groupGames(markets: Market[]): Game[] {
+  const groups = new Map<string, Game>();
+
+  for (const market of markets) {
+    const name = gameName(market);
+
+    // Prefer the event's stable ID so similarly named games remain separate.
+    const id = market.eventId
+      ? `event:${market.eventId}`
+      : `name:${name.toLowerCase().trim()}`;
+
+    const existing = groups.get(id);
+
+    if (existing) {
+      existing.markets.push(market);
+    } else {
+      groups.set(id, {
+        id,
+        name,
+        markets: [market],
+      });
+    }
+  }
+
+  return Array.from(groups.values()).sort(
+    (a, b) => b.markets.length - a.markets.length
+  );
+}
+
+function buildSignals(
+  markets: Market[],
+  history: History,
+  league: string
+): Signal[] {
+  const signals: Signal[] = [];
+
+  for (const market of markets) {
+    const mid = marketId(market);
+
+    if (!mid) continue;
+
+    for (const [index, outcome] of (market.outcomes || []).entries()) {
+      const id = `${league}:${mid}:${outcome.outcomeId || index}`;
+      const ticks = history[id] || [];
+
+      if (
+        ticks.length < 2 ||
+        ticks[ticks.length - 1].at - ticks[0].at < 60000
+      ) {
+        continue;
+      }
+
+      const opening = ticks[0].prob;
+      const current = ticks[ticks.length - 1].prob;
+      const change = (current - opening) * 100;
+
+      if (
+        Math.abs(change) < 0.5 ||
+        current < 1 / 3 ||
+        current > 0.85
+      ) {
+        continue;
+      }
+
+      signals.push({
+        id,
+        label: `${gameName(market)} · ${marketName(market)}`,
+        outcome: outcome.name || outcome.label || `Outcome ${index + 1}`,
+        league,
+        opening,
+        current,
+        change,
+        observations: ticks.length,
+        score: Math.abs(change),
+        at: ticks[ticks.length - 1].at,
+      });
+    }
+  }
+
+  return signals.sort((a, b) => b.score - a.score);
+}
+
+export default function Home() {
+  const [history, setHistory] = useState<History>({});
+  const [picks, setPicks] = useState<Signal[]>([]);
+  const [view, setView] = useState<'markets' | 'signals' | 'picks'>('markets');
+  const [league, setLeague] = useState('NFL');
+  const [query, setQuery] = useState('');
+  const [markets, setMarkets] = useState<Market[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [updated, setUpdated] = useState('');
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const [category, setCategory] = useState<Category>('Moneyline');
+  const [watch, setWatch] = useState<string[]>([]);
+  const [onlyWatch, setOnlyWatch] = useState(false);
+
+  useEffect(() => {
+    try {
+      setWatch(JSON.parse(localStorage.getItem(watchKey) || '[]'));
+      setHistory(JSON.parse(localStorage.getItem(historyKey) || '{}'));
+      setPicks(JSON.parse(localStorage.getItem(picksKey) || '[]'));
+    } catch {
+      // Continue with empty local data.
+    }
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+
+    try {
+      const response = await fetch(
+        `/api/markets?league=${encodeURIComponent(league)}`,
+        { cache: 'no-store' }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to load markets');
+      }
+
+      const incoming: Market[] = Array.isArray(data.markets)
+        ? data.markets
+        : [];
+
+      setMarkets(incoming);
+      setUpdated(data.updatedAt || '');
+
+      setHistory((previous) => {
+        const next: History = { ...previous };
+        const now = Date.now();
+
+        for (const market of incoming) {
+          const mid = marketId(market);
+
+          if (!mid) continue;
+
+          for (const [index, outcome] of (
+            market.outcomes || []
+          ).entries()) {
+            const probability = numericProbability(outcome.price);
+
+            if (probability === null) continue;
+
+            const id = `${league}:${mid}:${outcome.outcomeId || index}`;
+            const old = next[id] || [];
+
+            if (
+              !old.length ||
+              old[old.length - 1].prob !== probability ||
+              now - old[old.length - 1].at >= 60000
+            ) {
+              next[id] = [
+                ...old,
+                { at: now, prob: probability },
+              ].slice(-500);
+            }
+          }
+        }
+
+        try {
+          localStorage.setItem(historyKey, JSON.stringify(next));
+        } catch {
+          // Storage may be unavailable or full.
+        }
+
+        return next;
+      });
+
+      setError('');
+    } catch (err) {
+      setMarkets([]);
+      setError(
+        err instanceof Error ? err.message : 'Connection error'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [league]);
+
+  useEffect(() => {
+    load();
+
+    const interval = setInterval(load, 60000);
+
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const signals = useMemo(
+    () => buildSignals(markets, history, league),
+    [markets, history, league]
+  );
+
+  const games = useMemo(() => groupGames(markets), [markets]);
+
+  const filteredGames = useMemo(() => {
+    const search = query.trim().toLowerCase();
+
+    return games.filter((game) => {
+      const matchesSearch =
+        !search ||
+        game.name.toLowerCase().includes(search) ||
+        game.markets.some(
+          (market) =>
+            marketName(market).toLowerCase().includes(search) ||
+            marketCategory(market).toLowerCase().includes(search) ||
+            (market.outcomes || []).some((outcome) =>
+              (outcome.name || outcome.label || '')
+                .toLowerCase()
+                .includes(search)
+            )
+        );
+
+      const matchesWatch =
+        !onlyWatch ||
+        game.markets.some((market) =>
+          watch.includes(marketId(market))
+        );
+
+      return matchesSearch && matchesWatch;
+    });
+  }, [games, query, onlyWatch, watch]);
+
+  const selectedGame = useMemo(
+    () => games.find((game) => game.id === selectedGameId) || null,
+    [games, selectedGameId]
+  );
+
+  const selectedMarkets = useMemo(
+    () =>
+      selectedGame
+        ? selectedGame.markets.filter(
+            (market) => marketCategory(market) === category
+          )
+        : [],
+    [selectedGame, category]
+  );
+
+  function openGame(game: Game) {
+    setSelectedGameId(game.id);
+
+    const firstAvailable = categories.find((item) =>
+      game.markets.some((market) => marketCategory(market) === item)
+    );
+
+    setCategory(firstAvailable || 'Moneyline');
+  }
+
+  function changeLeague(nextLeague: string) {
+    setLeague(nextLeague);
+    setSelectedGameId(null);
+    setQuery('');
+  }
+
+  function toggleWatch(id: string) {
+    const next = watch.includes(id)
+      ? watch.filter((item) => item !== id)
+      : [...watch, id];
+
+    setWatch(next);
+
+    try {
+      localStorage.setItem(watchKey, JSON.stringify(next));
+    } catch {
+      // Ignore local storage errors.
+    }
+  }
+
+  function publish() {
+    const selected = signals
+      .filter((signal) => signal.change > 0)
+      .slice(0, 5);
+
+    setPicks(selected);
+
+    try {
+      localStorage.setItem(picksKey, JSON.stringify(selected));
+    } catch {
+      // Ignore local storage errors.
+    }
+
+    setView('picks');
+  }
+
+  function exportPicks() {
+    const payload = {
+      source: 'LineShift',
+      generatedAt: new Date().toISOString(),
+      method:
+        'Positive price movement; candidates only, not recommendations',
+      picks,
+    };
+
+    const blob = new Blob(
+      [JSON.stringify(payload, null, 2)],
+      { type: 'application/json' }
+    );
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+
+    link.href = url;
+    link.download = 'lineshift-weekly-hot-picks.json';
+    link.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brandmark">
+            <Activity size={23} />
+          </div>
+          <div>
+            LINE<span>SHIFT</span>
+            <small>SPORTS MARKET INTELLIGENCE</small>
+          </div>
+        </div>
+
+        <div className="navlabel">WORKSPACE</div>
+
+        <button
+          className={'navitem ' + (view === 'markets' ? 'active' : '')}
+          onClick={() => setView('markets')}
+        >
+          <BarChart3 size={18} />
+          Market Overview
+        </button>
+
+        <button
+          className={'navitem ' + (view === 'signals' ? 'active' : '')}
+          onClick={() => setView('signals')}
+        >
+          <Activity size={18} />
+          Line Movement
+          <b>{signals.length}</b>
+        </button>
+
+        <button
+          className={'navitem ' + (view === 'picks' ? 'active' : '')}
+          onClick={() => setView('picks')}
+        >
+          <TrendingUp size={18} />
+          Weekly Hot Picks
+          <b>{picks.length}</b>
+        </button>
+
+        <button
+          className={'navitem ' + (onlyWatch ? 'active' : '')}
+          onClick={() => {
+            setOnlyWatch(!onlyWatch);
+            setSelectedGameId(null);
+            setView('markets');
+          }}
+        >
+          <TrendingUp size={18} />
+          Watchlist
+          <b>{watch.length}</b>
+        </button>
+
+        <div className="navlabel second">DATA SOURCE</div>
+
+        <div className="source">
+          <span className={'dot ' + (error ? 'red' : '')} />
+          <div>
+            Polymarket Gamma API
+            <small>
+              {error ? 'Unavailable' : 'Read-only connection'}
+            </small>
+          </div>
+        </div>
+
+        <div className="sidebottom">
+          <ShieldCheck size={18} />
+          <span>
+            Market data only
+            <br />
+            <small>No trades or account access</small>
+          </span>
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="top">
+          <div className="crumb">
+            WORKSPACE <span>/</span>{' '}
+            {selectedGame && view === 'markets'
+              ? 'MATCHUP DETAILS'
+              : 'MARKET OVERVIEW'}
+          </div>
+
+          <div className="topright">
+            <span className="live">
+              <span className={'dot ' + (error ? 'red' : '')} />
+              {error ? 'OFFLINE' : 'LIVE DATA'}
+            </span>
+
+            <a
+              href="https://docs.polymarket.com/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              API Docs <ExternalLink size={13} />
+            </a>
+          </div>
+        </header>
+
+        <div className="content">
+          <div className="heading">
+            <div>
+              <div className="eyebrow">
+                TRACK THE LINES. SPOT THE SHIFTS.
+              </div>
+
+              <h1>
+                LineShift Overview
+                <span className="headingdot">.</span>
+              </h1>
+
+              <p>
+                Explore sports prediction markets, compare implied
+                probabilities, and track the contracts that matter.
+              </p>
+            </div>
+
+            <button
+              className="refresh"
+              onClick={load}
+              disabled={loading}
+            >
+              <RefreshCw
+                size={16}
+                className={loading ? 'spin' : ''}
+              />
+              Refresh Data
+            </button>
+          </div>
+
+          <section className="stats">
+            <div className="stat">
+              <div className="stathead">
+                AVAILABLE MATCHUPS <BarChart3 size={18} />
+              </div>
+              <div className="statvalue">
+                {loading ? '…' : games.length.toLocaleString()}
+              </div>
+              <div className="statfoot">
+                Grouped {league} events
+              </div>
+            </div>
+
+            <div className="stat">
+              <div className="stathead">
+                AVAILABLE CONTRACTS <TrendingUp size={18} />
+              </div>
+              <div className="statvalue">
+                {loading ? '…' : markets.length.toLocaleString()}
+              </div>
+              <div className="statfoot">
+                Current market feed
+              </div>
+            </div>
+
+            <div className="stat">
+              <div className="stathead">
+                DATA CONNECTION{' '}
+                {error ? <WifiOff size={18} /> : <Wifi size={18} />}
+              </div>
+              <div className="statvalue smaller">
+                {error ? 'Unavailable' : 'Connected'}
+              </div>
+              <div className="statfoot">
+                Refreshes every 60 seconds
+              </div>
+            </div>
+
+            <div className="stat">
+              <div className="stathead">
+                TRADING MODE <ShieldCheck size={18} />
+              </div>
+              <div className="statvalue smaller">
+                Read Only
+              </div>
+              <div className="statfoot">
+                No orders are placed
+              </div>
+            </div>
+          </section>
+
+          {view === 'signals' && (
+            <section className="panel signalpanel">
+              <div className="panelhead">
+                <div>
+                  <div className="eyebrow">
+                    PRICE MOVEMENT ENGINE
+                  </div>
+                  <h2>
+                    LineShift Signals{' '}
+                    <span className="count">{signals.length}</span>
+                  </h2>
+                </div>
+
+                <button
+                  className="refresh"
+                  onClick={publish}
+                  disabled={!signals.some((signal) => signal.change > 0)}
+                >
+                  Select Top 5 Hot Picks
+                </button>
+              </div>
+
+              <p className="signalintro">
+                Observed changes since this browser started collecting
+                prices. A positive move means implied probability
+                increased, not that the contract is a good bet.
+                Requires at least two observations a minute apart.
+              </p>
+
+              <div className="signalgrid">
+                {signals.map((signal) => (
+                  <div className="signalcard" key={signal.id}>
+                    <div className="eyebrow">
+                      {signal.league} · {signal.observations} observations
+                    </div>
+
+                    <h3>{signal.label}</h3>
+                    <div className="muted">{signal.outcome}</div>
+
+                    <div className="signalnumbers">
+                      <span>
+                        {(signal.opening * 100).toFixed(1)}% →{' '}
+                        {(signal.current * 100).toFixed(1)}%
+                      </span>
+
+                      <strong
+                        className={
+                          signal.change >= 0 ? 'positive' : 'negative'
+                        }
+                      >
+                        {signal.change > 0 ? '+' : ''}
+                        {signal.change.toFixed(1)} pp
+                      </strong>
+                    </div>
+                  </div>
+                ))}
+
+                {!signals.length && (
+                  <div className="signalempty">
+                    No qualified movements yet. Keep the dashboard
+                    open while prices refresh.
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {view === 'picks' && (
+            <section className="panel signalpanel">
+              <div className="panelhead">
+                <div>
+                  <div className="eyebrow">
+                    WEEKLY PARLAY INTEGRATION
+                  </div>
+                  <h2>
+                    Weekly Hot Picks{' '}
+                    <span className="count">{picks.length}/5</span>
+                  </h2>
+                </div>
+
+                <button
+                  className="refresh"
+                  disabled={!picks.length}
+                  onClick={exportPicks}
+                >
+                  Export JSON
+                </button>
+              </div>
+
+              <p className="signalintro">
+                These are line-movement candidates, not verified
+                betting recommendations. Nothing is automatically
+                published.
+              </p>
+
+              <div className="signalgrid">
+                {picks.map((signal, index) => (
+                  <div className="signalcard" key={signal.id}>
+                    <div className="eyebrow">
+                      PICK {index + 1} · {signal.league}
+                    </div>
+
+                    <h3>{signal.label}</h3>
+                    <div className="muted">{signal.outcome}</div>
+
+                    <div className="signalnumbers">
+                      <span>
+                        {(signal.current * 100).toFixed(1)}% implied
+                      </span>
+
+                      <strong className="positive">
+                        +{signal.change.toFixed(1)} pp
+                      </strong>
+                    </div>
+                  </div>
+                ))}
+
+                {!picks.length && (
+                  <div className="signalempty">
+                    No Hot Picks selected yet.
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {view === 'markets' && (
+            <section className="panel">
+              {!selectedGame ? (
+                <>
+                  <div className="panelhead">
+                    <div>
+                      <div className="eyebrow">
+                        MATCHUP EXPLORER
+                      </div>
+
+                      <h2>
+                        Upcoming Matchups{' '}
+                        <span className="count">
+                          {filteredGames.length}
+                        </span>
+                      </h2>
+                    </div>
+
+                    <div className="last">
+                      {updated
+                        ? 'Last updated ' +
+                          new Date(updated).toLocaleTimeString()
+                        : 'Waiting for feed'}
+                    </div>
+                  </div>
+
+                  <div className="filters">
+                    <div className="leagues">
+                      {leagues.map((item) => (
+                        <button
+                          key={item}
+                          className={
+                            league === item ? 'chosen' : ''
+                          }
+                          onClick={() => changeLeague(item)}
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="search">
+                      <Search size={16} />
+                      <input
+                        value={query}
+                        onChange={(event) =>
+                          setQuery(event.target.value)
+                        }
+                        placeholder="Search teams or matchups"
+                      />
+                    </div>
+                  </div>
+
+                  {error && (
+                    <div className="error">
+                      <CircleHelp size={18} />
+                      <div>
+                        <strong>
+                          Live feed temporarily unavailable.
+                        </strong>
+                        <div>{error}</div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="tablewrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>MATCHUP</th>
+                          <th>AVAILABLE CONTRACTS</th>
+                          <th>MARKET TYPES</th>
+                          <th>EXCHANGE</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {filteredGames.map((game) => {
+                          const available = categories.filter(
+                            (item) =>
+                              game.markets.some(
+                                (market) =>
+                                  marketCategory(market) === item
+                              )
+                          );
+
+                          return (
+                            <tr
+                              key={game.id}
+                              onClick={() => openGame(game)}
+                            >
+                              <td>
+                                <div className="marketname">
+                                  {game.name}
+                                </div>
+                                <div className="marketid">
+                                  Click to explore markets →
+                                </div>
+                              </td>
+
+                              <td className="volume">
+                                {game.markets.length.toLocaleString()}
+                              </td>
+
+                              <td>
+                                <div className="outcomes">
+                                  {available.map((item) => (
+                                    <span
+                                      key={item}
+                                      className="badge"
+                                    >
+                                      {item}
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+
+                              <td className="volume">
+                                Polymarket
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+
+                    {!loading && !filteredGames.length && (
+                      <div className="empty">
+                        <BarChart3 size={30} />
+                        <h3>
+                          {error
+                            ? 'No live data'
+                            : 'No matching games'}
+                        </h3>
+                        <p>
+                          {error
+                            ? 'Try refreshing later.'
+                            : 'Try another search or league.'}
+                        </p>
+                      </div>
+                    )}
+
+                    {loading && !games.length && (
+                      <div className="empty">
+                        <RefreshCw
+                          size={25}
+                          className="spin"
+                        />
+                        <p>Loading matchups…</p>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="panelhead">
+                    <div>
+                      <button
+                        className="backbutton"
+                        onClick={() => setSelectedGameId(null)}
+                      >
+                        <ArrowLeft size={16} />
+                        Back to matchups
+                      </button>
+
+                      <div className="eyebrow">
+                        {league} MATCHUP DETAILS
+                      </div>
+
+                      <h2>{selectedGame.name}</h2>
+
+                      <p className="muted">
+                        {selectedGame.markets.length} available
+                        contracts · Polymarket
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="market-tabs">
+                    {categories.map((item) => {
+                      const count = selectedGame.markets.filter(
+                        (market) =>
+                          marketCategory(market) === item
+                      ).length;
+
+                      return (
+                        <button
+                          key={item}
+                          className={
+                            category === item
+                              ? 'market-tab selected'
+                              : 'market-tab'
+                          }
+                          onClick={() => setCategory(item)}
+                        >
+                          {item}
+                          <span>{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="tablewrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>MARKET / BETTING LINE</th>
+                          <th>OUTCOMES & IMPLIED PROBABILITY</th>
+                          <th>VOLUME</th>
+                          <th>WATCH</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {selectedMarkets.map((market, index) => {
+                          const id = marketId(market) || String(index);
+
+                          return (
+                            <tr key={id}>
+                              <td>
+                                <div className="marketname">
+                                  {marketName(market)}
+                                </div>
+
+                                {market.line !== null &&
+                                  market.line !== undefined && (
+                                    <div className="marketid">
+                                      Line: {market.line}
+                                    </div>
+                                  )}
+                              </td>
+
+                              <td>
+                                <div className="outcomes">
+                                  {(market.outcomes || []).map(
+                                    (outcome, outcomeIndex) => (
+                                      <span
+                                        className="outcome"
+                                        key={outcomeIndex}
+                                      >
+                                        {outcome.name ||
+                                          outcome.label ||
+                                          `Outcome ${outcomeIndex + 1}`}
+
+                                        <strong>
+                                          {price(outcome.price)}
+                                        </strong>
+                                      </span>
+                                    )
+                                  )}
+                                </div>
+                              </td>
+
+                              <td className="volume">
+                                {money(market.volume)}
+                              </td>
+
+                              <td>
+                                <button
+                                  className={
+                                    'star ' +
+                                    (watch.includes(id)
+                                      ? 'saved'
+                                      : '')
+                                  }
+                                  onClick={() => toggleWatch(id)}
+                                  title="Toggle watchlist"
+                                >
+                                  {watch.includes(id) ? '★' : '☆'}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+
+                    {!selectedMarkets.length && (
+                      <div className="empty">
+                        <BarChart3 size={30} />
+                        <h3>No contracts in this category</h3>
+                        <p>
+                          Try another market type.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <div className="panelbottom">
+                <span>
+                  Source: Polymarket Gamma API · Read-only
+                </span>
+                <span>
+                  Displayed prices are indicative, not guaranteed
+                  executable quotes
+                </span>
+              </div>
+            </section>
+          )}
+
+          <div className="disclaimer">
+            LineShift is an independent demo dashboard and is not
+            affiliated with Polymarket. Market-implied probabilities
+            are not guaranteed outcomes. Displayed prices may differ
+            from executable order-book quotes. This application does
+            not place trades or provide financial advice.
+          </div>
+        </div>
+      </main>
+    </div>
+  );
 }
