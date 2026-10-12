@@ -93,6 +93,8 @@ const categories: Category[] = [
   'Other',
 ];
 
+const DEFAULT_PROP_LIMIT = 25;
+
 function numericProbability(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === '') return null;
 
@@ -112,7 +114,11 @@ function price(raw: unknown): string {
 function americanOdds(raw: unknown): string {
   const probability = numericProbability(raw);
 
-  if (probability === null || probability === 0 || probability === 1) {
+  if (
+    probability === null ||
+    probability === 0 ||
+    probability === 1
+  ) {
     return '—';
   }
 
@@ -134,7 +140,10 @@ function money(raw: unknown): string {
   const value = Number(raw);
 
   return Number.isFinite(value) && value > 0
-    ? '$' + value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+    ? '$' +
+        value.toLocaleString(undefined, {
+          maximumFractionDigits: 0,
+        })
     : '—';
 }
 
@@ -150,7 +159,9 @@ function gameName(market: Market): string {
   return market.eventName || marketName(market);
 }
 
-function kickoffTimestamp(value: string | null | undefined): number {
+function kickoffTimestamp(
+  value: string | null | undefined
+): number {
   if (!value) return Infinity;
 
   const timestamp = Date.parse(value);
@@ -158,7 +169,9 @@ function kickoffTimestamp(value: string | null | undefined): number {
   return Number.isFinite(timestamp) ? timestamp : Infinity;
 }
 
-function formatKickoff(value: string | null | undefined): string {
+function formatKickoff(
+  value: string | null | undefined
+): string {
   if (!value || !Number.isFinite(Date.parse(value))) {
     return 'Kickoff time unavailable';
   }
@@ -192,7 +205,9 @@ function normalizeMatchupName(rawName: string): string {
   ];
 
   for (const suffix of suffixes) {
-    if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
+    if (
+      name.toLowerCase().endsWith(suffix.toLowerCase())
+    ) {
       return name.slice(0, -suffix.length).trim();
     }
   }
@@ -202,7 +217,9 @@ function normalizeMatchupName(rawName: string): string {
 
 function marketCategory(market: Market): Category {
   const type = (market.marketType || '').toLowerCase();
-  const sportsType = (market.sportsMarketType || '').toLowerCase();
+  const sportsType = (
+    market.sportsMarketType || ''
+  ).toLowerCase();
   const question = marketName(market).toLowerCase();
 
   if (
@@ -226,7 +243,9 @@ function marketCategory(market: Market): Category {
   if (
     type.includes('total') ||
     sportsType.includes('total') ||
-    /total points|over\/under|combined points|o\/u/.test(question)
+    /total points|over\/under|combined points|o\/u/.test(
+      question
+    )
   ) {
     return 'Totals';
   }
@@ -250,7 +269,9 @@ function groupGames(markets: Market[]): Game[] {
     const name = normalizeMatchupName(gameName(market));
     const kickoff = market.gameStartTime || null;
 
-    const kickoffKey = Number.isFinite(kickoffTimestamp(kickoff))
+    const kickoffKey = Number.isFinite(
+      kickoffTimestamp(kickoff)
+    )
       ? new Date(kickoff as string).toISOString()
       : 'unknown';
 
@@ -279,6 +300,83 @@ function groupGames(markets: Market[]): Game[] {
   });
 }
 
+// Extract the player name from common Polymarket prop titles.
+function playerName(market: Market): string {
+  const title = marketName(market).trim();
+
+  const colonIndex = title.indexOf(':');
+
+  if (colonIndex > 0) {
+    return title.slice(0, colonIndex).trim();
+  }
+
+  const patterns = [
+    /\s+(?:Passing Yards|Rushing Yards|Receiving Yards|Receptions)\b/i,
+    /\s+(?:Anytime Touchdown|First Touchdown)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = title.match(pattern);
+
+    if (match && match.index !== undefined && match.index > 0) {
+      return title.slice(0, match.index).trim();
+    }
+  }
+
+  return 'Other Player Props';
+}
+
+function volumeNumber(market: Market): number {
+  const value = Number(market.volume);
+
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function sortPropsByVolume(markets: Market[]): Market[] {
+  return [...markets].sort(
+    (a, b) => volumeNumber(b) - volumeNumber(a)
+  );
+}
+
+type PlayerGroup = {
+  name: string;
+  markets: Market[];
+  totalVolume: number;
+};
+
+function groupPlayerProps(markets: Market[]): PlayerGroup[] {
+  const groups = new Map<string, PlayerGroup>();
+
+  for (const market of markets) {
+    const name = playerName(market);
+    const key = name.toLowerCase();
+
+    const existing = groups.get(key);
+
+    if (existing) {
+      existing.markets.push(market);
+      existing.totalVolume += volumeNumber(market);
+    } else {
+      groups.set(key, {
+        name,
+        markets: [market],
+        totalVolume: volumeNumber(market),
+      });
+    }
+  }
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      markets: sortPropsByVolume(group.markets),
+    }))
+    .sort(
+      (a, b) =>
+        b.totalVolume - a.totalVolume ||
+        a.name.localeCompare(b.name)
+    );
+}
+
 function buildSignals(
   markets: Market[],
   history: History,
@@ -291,7 +389,9 @@ function buildSignals(
 
     if (!mid) continue;
 
-    for (const [index, outcome] of (market.outcomes || []).entries()) {
+    for (const [index, outcome] of (
+      market.outcomes || []
+    ).entries()) {
       const id = `${league}:${mid}:${outcome.outcomeId || index}`;
       const ticks = history[id] || [];
 
@@ -316,8 +416,13 @@ function buildSignals(
 
       signals.push({
         id,
-        label: `${normalizeMatchupName(gameName(market))} · ${marketName(market)}`,
-        outcome: outcome.name || outcome.label || `Outcome ${index + 1}`,
+        label: `${normalizeMatchupName(
+          gameName(market)
+        )} · ${marketName(market)}`,
+        outcome:
+          outcome.name ||
+          outcome.label ||
+          `Outcome ${index + 1}`,
         league,
         opening,
         current,
@@ -335,32 +440,44 @@ function buildSignals(
 export default function Home() {
   const [history, setHistory] = useState<History>({});
   const [picks, setPicks] = useState<Signal[]>([]);
-  const [view, setView] = useState<'markets' | 'signals' | 'picks'>(
-    'markets'
-  );
+  const [view, setView] = useState<
+    'markets' | 'signals' | 'picks'
+  >('markets');
   const [league, setLeague] = useState('NFL');
   const [query, setQuery] = useState('');
   const [markets, setMarkets] = useState<Market[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [updated, setUpdated] = useState('');
-  const [selectedGameId, setSelectedGameId] = useState<string | null>(
-    null
-  );
-  const [category, setCategory] = useState<Category>('Moneyline');
+  const [selectedGameId, setSelectedGameId] = useState<
+    string | null
+  >(null);
+  const [category, setCategory] =
+    useState<Category>('Moneyline');
   const [watch, setWatch] = useState<string[]>([]);
   const [onlyWatch, setOnlyWatch] = useState(false);
-  const [oddsFormat, setOddsFormat] = useState<OddsFormat>('probability');
+  const [oddsFormat, setOddsFormat] =
+    useState<OddsFormat>('probability');
+  const [showAllProps, setShowAllProps] = useState(false);
 
   useEffect(() => {
     try {
-      setWatch(JSON.parse(localStorage.getItem(watchKey) || '[]'));
-      setHistory(JSON.parse(localStorage.getItem(historyKey) || '{}'));
-      setPicks(JSON.parse(localStorage.getItem(picksKey) || '[]'));
+      setWatch(
+        JSON.parse(localStorage.getItem(watchKey) || '[]')
+      );
+      setHistory(
+        JSON.parse(localStorage.getItem(historyKey) || '{}')
+      );
+      setPicks(
+        JSON.parse(localStorage.getItem(picksKey) || '[]')
+      );
 
       const savedFormat = localStorage.getItem(oddsKey);
 
-      if (savedFormat === 'american' || savedFormat === 'probability') {
+      if (
+        savedFormat === 'american' ||
+        savedFormat === 'probability'
+      ) {
         setOddsFormat(savedFormat);
       }
     } catch {
@@ -390,7 +507,9 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Unable to load markets');
+        throw new Error(
+          data.error || 'Unable to load markets'
+        );
       }
 
       const incoming: Market[] = Array.isArray(data.markets)
@@ -412,11 +531,15 @@ export default function Home() {
           for (const [index, outcome] of (
             market.outcomes || []
           ).entries()) {
-            const probability = numericProbability(outcome.price);
+            const probability = numericProbability(
+              outcome.price
+            );
 
             if (probability === null) continue;
 
-            const id = `${league}:${mid}:${outcome.outcomeId || index}`;
+            const id = `${league}:${mid}:${
+              outcome.outcomeId || index
+            }`;
             const old = next[id] || [];
 
             if (
@@ -433,7 +556,10 @@ export default function Home() {
         }
 
         try {
-          localStorage.setItem(historyKey, JSON.stringify(next));
+          localStorage.setItem(
+            historyKey,
+            JSON.stringify(next)
+          );
         } catch {
           // Ignore local storage errors.
         }
@@ -445,7 +571,9 @@ export default function Home() {
     } catch (err) {
       setMarkets([]);
       setError(
-        err instanceof Error ? err.message : 'Connection error'
+        err instanceof Error
+          ? err.message
+          : 'Connection error'
       );
     } finally {
       setLoading(false);
@@ -465,7 +593,10 @@ export default function Home() {
     [markets, history, league]
   );
 
-  const games = useMemo(() => groupGames(markets), [markets]);
+  const games = useMemo(
+    () => groupGames(markets),
+    [markets]
+  );
 
   const filteredGames = useMemo(() => {
     const search = query.trim().toLowerCase();
@@ -476,10 +607,18 @@ export default function Home() {
         game.name.toLowerCase().includes(search) ||
         game.markets.some(
           (market) =>
-            marketName(market).toLowerCase().includes(search) ||
-            marketCategory(market).toLowerCase().includes(search) ||
+            marketName(market)
+              .toLowerCase()
+              .includes(search) ||
+            marketCategory(market)
+              .toLowerCase()
+              .includes(search) ||
             (market.outcomes || []).some((outcome) =>
-              (outcome.name || outcome.label || '')
+              (
+                outcome.name ||
+                outcome.label ||
+                ''
+              )
                 .toLowerCase()
                 .includes(search)
             )
@@ -496,7 +635,9 @@ export default function Home() {
   }, [games, query, onlyWatch, watch]);
 
   const selectedGame = useMemo(
-    () => games.find((game) => game.id === selectedGameId) || null,
+    () =>
+      games.find((game) => game.id === selectedGameId) ||
+      null,
     [games, selectedGameId]
   );
 
@@ -504,17 +645,49 @@ export default function Home() {
     () =>
       selectedGame
         ? selectedGame.markets.filter(
-            (market) => marketCategory(market) === category
+            (market) =>
+              marketCategory(market) === category
           )
         : [],
     [selectedGame, category]
   );
 
+  const playerGroups = useMemo(
+    () => groupPlayerProps(selectedMarkets),
+    [selectedMarkets]
+  );
+
+  const visiblePlayerGroups = useMemo(() => {
+    if (showAllProps) return playerGroups;
+
+    let remaining = DEFAULT_PROP_LIMIT;
+
+    return playerGroups
+      .map((group) => {
+        const visibleMarkets = group.markets.slice(
+          0,
+          remaining
+        );
+
+        remaining -= visibleMarkets.length;
+
+        return {
+          ...group,
+          markets: visibleMarkets,
+        };
+      })
+      .filter((group) => group.markets.length > 0);
+  }, [playerGroups, showAllProps]);
+
   function openGame(game: Game) {
     setSelectedGameId(game.id);
+    setShowAllProps(false);
 
     const firstAvailable = categories.find((item) =>
-      game.markets.some((market) => marketCategory(market) === item)
+      game.markets.some(
+        (market) =>
+          marketCategory(market) === item
+      )
     );
 
     setCategory(firstAvailable || 'Moneyline');
@@ -524,6 +697,12 @@ export default function Home() {
     setLeague(nextLeague);
     setSelectedGameId(null);
     setQuery('');
+    setShowAllProps(false);
+  }
+
+  function changeCategory(nextCategory: Category) {
+    setCategory(nextCategory);
+    setShowAllProps(false);
   }
 
   function toggleWatch(id: string) {
@@ -534,7 +713,10 @@ export default function Home() {
     setWatch(next);
 
     try {
-      localStorage.setItem(watchKey, JSON.stringify(next));
+      localStorage.setItem(
+        watchKey,
+        JSON.stringify(next)
+      );
     } catch {
       // Ignore local storage errors.
     }
@@ -548,7 +730,10 @@ export default function Home() {
     setPicks(selected);
 
     try {
-      localStorage.setItem(picksKey, JSON.stringify(selected));
+      localStorage.setItem(
+        picksKey,
+        JSON.stringify(selected)
+      );
     } catch {
       // Ignore local storage errors.
     }
@@ -574,10 +759,76 @@ export default function Home() {
     const link = document.createElement('a');
 
     link.href = url;
-    link.download = 'lineshift-weekly-hot-picks.json';
+    link.download =
+      'lineshift-weekly-hot-picks.json';
     link.click();
 
     URL.revokeObjectURL(url);
+  }
+
+  function renderMarketRow(
+    market: Market,
+    index: number
+  ) {
+    const id = marketId(market) || String(index);
+
+    return (
+      <tr key={id}>
+        <td>
+          <div className="marketname">
+            {marketName(market)}
+          </div>
+
+          {market.line !== null &&
+            market.line !== undefined && (
+              <div className="marketid">
+                Line: {market.line}
+              </div>
+            )}
+        </td>
+
+        <td>
+          <div className="outcomes">
+            {(market.outcomes || []).map(
+              (outcome, outcomeIndex) => (
+                <span
+                  className="outcome"
+                  key={outcomeIndex}
+                >
+                  {outcome.name ||
+                    outcome.label ||
+                    `Outcome ${outcomeIndex + 1}`}
+
+                  <strong>
+                    {formatPrice(
+                      outcome.price,
+                      oddsFormat
+                    )}
+                  </strong>
+                </span>
+              )
+            )}
+          </div>
+        </td>
+
+        <td className="volume">
+          {money(market.volume)}
+        </td>
+
+        <td>
+          <button
+            className={
+              'star ' +
+              (watch.includes(id) ? 'saved' : '')
+            }
+            onClick={() => toggleWatch(id)}
+            title="Toggle watchlist"
+          >
+            {watch.includes(id) ? '★' : '☆'}
+          </button>
+        </td>
+      </tr>
+    );
   }
 
   return (
@@ -589,14 +840,21 @@ export default function Home() {
           </div>
           <div>
             LINE<span>SHIFT</span>
-            <small>SPORTS MARKET INTELLIGENCE</small>
+            <small>
+              SPORTS MARKET INTELLIGENCE
+            </small>
           </div>
         </div>
 
-        <div className="navlabel">WORKSPACE</div>
+        <div className="navlabel">
+          WORKSPACE
+        </div>
 
         <button
-          className={'navitem ' + (view === 'markets' ? 'active' : '')}
+          className={
+            'navitem ' +
+            (view === 'markets' ? 'active' : '')
+          }
           onClick={() => setView('markets')}
         >
           <BarChart3 size={18} />
@@ -604,7 +862,10 @@ export default function Home() {
         </button>
 
         <button
-          className={'navitem ' + (view === 'signals' ? 'active' : '')}
+          className={
+            'navitem ' +
+            (view === 'signals' ? 'active' : '')
+          }
           onClick={() => setView('signals')}
         >
           <Activity size={18} />
@@ -613,7 +874,10 @@ export default function Home() {
         </button>
 
         <button
-          className={'navitem ' + (view === 'picks' ? 'active' : '')}
+          className={
+            'navitem ' +
+            (view === 'picks' ? 'active' : '')
+          }
           onClick={() => setView('picks')}
         >
           <TrendingUp size={18} />
@@ -622,7 +886,10 @@ export default function Home() {
         </button>
 
         <button
-          className={'navitem ' + (onlyWatch ? 'active' : '')}
+          className={
+            'navitem ' +
+            (onlyWatch ? 'active' : '')
+          }
           onClick={() => {
             setOnlyWatch(!onlyWatch);
             setSelectedGameId(null);
@@ -634,14 +901,22 @@ export default function Home() {
           <b>{watch.length}</b>
         </button>
 
-        <div className="navlabel second">DATA SOURCE</div>
+        <div className="navlabel second">
+          DATA SOURCE
+        </div>
 
         <div className="source">
-          <span className={'dot ' + (error ? 'red' : '')} />
+          <span
+            className={
+              'dot ' + (error ? 'red' : '')
+            }
+          />
           <div>
             Polymarket Gamma API
             <small>
-              {error ? 'Unavailable' : 'Read-only connection'}
+              {error
+                ? 'Unavailable'
+                : 'Read-only connection'}
             </small>
           </div>
         </div>
@@ -651,7 +926,9 @@ export default function Home() {
           <span>
             Market data only
             <br />
-            <small>No trades or account access</small>
+            <small>
+              No trades or account access
+            </small>
           </span>
         </div>
       </aside>
@@ -660,15 +937,22 @@ export default function Home() {
         <header className="top">
           <div className="crumb">
             WORKSPACE <span>/</span>{' '}
-            {selectedGame && view === 'markets'
+            {selectedGame &&
+            view === 'markets'
               ? 'MATCHUP DETAILS'
               : 'MARKET OVERVIEW'}
           </div>
 
           <div className="topright">
             <span className="live">
-              <span className={'dot ' + (error ? 'red' : '')} />
-              {error ? 'OFFLINE' : 'LIVE DATA'}
+              <span
+                className={
+                  'dot ' + (error ? 'red' : '')
+                }
+              />
+              {error
+                ? 'OFFLINE'
+                : 'LIVE DATA'}
             </span>
 
             <a
@@ -676,7 +960,8 @@ export default function Home() {
               target="_blank"
               rel="noreferrer"
             >
-              API Docs <ExternalLink size={13} />
+              API Docs{' '}
+              <ExternalLink size={13} />
             </a>
           </div>
         </header>
@@ -690,12 +975,15 @@ export default function Home() {
 
               <h1>
                 LineShift Overview
-                <span className="headingdot">.</span>
+                <span className="headingdot">
+                  .
+                </span>
               </h1>
 
               <p>
-                Explore sports prediction markets, compare implied
-                probabilities, and track the contracts that matter.
+                Explore sports prediction markets,
+                compare implied probabilities, and
+                track the contracts that matter.
               </p>
             </div>
 
@@ -706,7 +994,9 @@ export default function Home() {
             >
               <RefreshCw
                 size={16}
-                className={loading ? 'spin' : ''}
+                className={
+                  loading ? 'spin' : ''
+                }
               />
               Refresh Data
             </button>
@@ -715,10 +1005,13 @@ export default function Home() {
           <section className="stats">
             <div className="stat">
               <div className="stathead">
-                AVAILABLE MATCHUPS <BarChart3 size={18} />
+                AVAILABLE MATCHUPS{' '}
+                <BarChart3 size={18} />
               </div>
               <div className="statvalue">
-                {loading ? '…' : games.length.toLocaleString()}
+                {loading
+                  ? '…'
+                  : games.length.toLocaleString()}
               </div>
               <div className="statfoot">
                 Upcoming {league} events
@@ -727,10 +1020,13 @@ export default function Home() {
 
             <div className="stat">
               <div className="stathead">
-                AVAILABLE CONTRACTS <TrendingUp size={18} />
+                AVAILABLE CONTRACTS{' '}
+                <TrendingUp size={18} />
               </div>
               <div className="statvalue">
-                {loading ? '…' : markets.length.toLocaleString()}
+                {loading
+                  ? '…'
+                  : markets.length.toLocaleString()}
               </div>
               <div className="statfoot">
                 Current market feed
@@ -740,10 +1036,16 @@ export default function Home() {
             <div className="stat">
               <div className="stathead">
                 DATA CONNECTION{' '}
-                {error ? <WifiOff size={18} /> : <Wifi size={18} />}
+                {error ? (
+                  <WifiOff size={18} />
+                ) : (
+                  <Wifi size={18} />
+                )}
               </div>
               <div className="statvalue smaller">
-                {error ? 'Unavailable' : 'Connected'}
+                {error
+                  ? 'Unavailable'
+                  : 'Connected'}
               </div>
               <div className="statfoot">
                 Refreshes every 60 seconds
@@ -752,7 +1054,8 @@ export default function Home() {
 
             <div className="stat">
               <div className="stathead">
-                TRADING MODE <ShieldCheck size={18} />
+                TRADING MODE{' '}
+                <ShieldCheck size={18} />
               </div>
               <div className="statvalue smaller">
                 Read Only
@@ -772,49 +1075,77 @@ export default function Home() {
                   </div>
                   <h2>
                     LineShift Signals{' '}
-                    <span className="count">{signals.length}</span>
+                    <span className="count">
+                      {signals.length}
+                    </span>
                   </h2>
                 </div>
 
                 <button
                   className="refresh"
                   onClick={publish}
-                  disabled={!signals.some((signal) => signal.change > 0)}
+                  disabled={
+                    !signals.some(
+                      (signal) =>
+                        signal.change > 0
+                    )
+                  }
                 >
                   Select Top 5 Hot Picks
                 </button>
               </div>
 
               <p className="signalintro">
-                Observed changes since this browser started collecting
-                prices. A positive move means implied probability
-                increased, not that the contract is a good bet.
-                Requires at least two observations a minute apart.
+                Observed changes since this browser
+                started collecting prices. A positive
+                move means implied probability
+                increased, not that the contract is
+                a good bet. Requires at least two
+                observations a minute apart.
               </p>
 
               <div className="signalgrid">
                 {signals.map((signal) => (
-                  <div className="signalcard" key={signal.id}>
+                  <div
+                    className="signalcard"
+                    key={signal.id}
+                  >
                     <div className="eyebrow">
-                      {signal.league} · {signal.observations} observations
+                      {signal.league} ·{' '}
+                      {signal.observations}{' '}
+                      observations
                     </div>
 
                     <h3>{signal.label}</h3>
-                    <div className="muted">{signal.outcome}</div>
+
+                    <div className="muted">
+                      {signal.outcome}
+                    </div>
 
                     <div className="signalnumbers">
                       <span>
-                        {(signal.opening * 100).toFixed(1)}% →{' '}
-                        {(signal.current * 100).toFixed(1)}%
+                        {(
+                          signal.opening * 100
+                        ).toFixed(1)}
+                        % →{' '}
+                        {(
+                          signal.current * 100
+                        ).toFixed(1)}
+                        %
                       </span>
 
                       <strong
                         className={
-                          signal.change >= 0 ? 'positive' : 'negative'
+                          signal.change >= 0
+                            ? 'positive'
+                            : 'negative'
                         }
                       >
-                        {signal.change > 0 ? '+' : ''}
-                        {signal.change.toFixed(1)} pp
+                        {signal.change > 0
+                          ? '+'
+                          : ''}
+                        {signal.change.toFixed(1)}{' '}
+                        pp
                       </strong>
                     </div>
                   </div>
@@ -822,8 +1153,9 @@ export default function Home() {
 
                 {!signals.length && (
                   <div className="signalempty">
-                    No qualified movements yet. Keep the dashboard
-                    open while prices refresh.
+                    No qualified movements yet.
+                    Keep the dashboard open while
+                    prices refresh.
                   </div>
                 )}
               </div>
@@ -839,7 +1171,9 @@ export default function Home() {
                   </div>
                   <h2>
                     Weekly Hot Picks{' '}
-                    <span className="count">{picks.length}/5</span>
+                    <span className="count">
+                      {picks.length}/5
+                    </span>
                   </h2>
                 </div>
 
@@ -853,33 +1187,53 @@ export default function Home() {
               </div>
 
               <p className="signalintro">
-                These are line-movement candidates, not verified
-                betting recommendations. Nothing is automatically
-                published.
+                These are line-movement candidates,
+                not verified betting
+                recommendations. Nothing is
+                automatically published.
               </p>
 
               <div className="signalgrid">
-                {picks.map((signal, index) => (
-                  <div className="signalcard" key={signal.id}>
-                    <div className="eyebrow">
-                      PICK {index + 1} · {signal.league}
+                {picks.map(
+                  (signal, index) => (
+                    <div
+                      className="signalcard"
+                      key={signal.id}
+                    >
+                      <div className="eyebrow">
+                        PICK {index + 1} ·{' '}
+                        {signal.league}
+                      </div>
+
+                      <h3>{signal.label}</h3>
+
+                      <div className="muted">
+                        {signal.outcome}
+                      </div>
+
+                      <div className="signalnumbers">
+                        <span>
+                          {formatPrice(
+                            signal.current,
+                            oddsFormat
+                          )}{' '}
+                          {oddsFormat ===
+                          'probability'
+                            ? 'implied'
+                            : 'equivalent'}
+                        </span>
+
+                        <strong className="positive">
+                          +
+                          {signal.change.toFixed(
+                            1
+                          )}{' '}
+                          pp
+                        </strong>
+                      </div>
                     </div>
-
-                    <h3>{signal.label}</h3>
-                    <div className="muted">{signal.outcome}</div>
-
-                    <div className="signalnumbers">
-                      <span>
-                        {formatPrice(signal.current, oddsFormat)}{' '}
-                        {oddsFormat === 'probability' ? 'implied' : 'equivalent'}
-                      </span>
-
-                      <strong className="positive">
-                        +{signal.change.toFixed(1)} pp
-                      </strong>
-                    </div>
-                  </div>
-                ))}
+                  )
+                )}
 
                 {!picks.length && (
                   <div className="signalempty">
@@ -911,7 +1265,9 @@ export default function Home() {
                     <div className="last">
                       {updated
                         ? 'Last updated ' +
-                          new Date(updated).toLocaleTimeString()
+                          new Date(
+                            updated
+                          ).toLocaleTimeString()
                         : 'Waiting for feed'}
                     </div>
                   </div>
@@ -922,9 +1278,13 @@ export default function Home() {
                         <button
                           key={item}
                           className={
-                            league === item ? 'chosen' : ''
+                            league === item
+                              ? 'chosen'
+                              : ''
                           }
-                          onClick={() => changeLeague(item)}
+                          onClick={() =>
+                            changeLeague(item)
+                          }
                         >
                           {item}
                         </button>
@@ -936,7 +1296,9 @@ export default function Home() {
                       <input
                         value={query}
                         onChange={(event) =>
-                          setQuery(event.target.value)
+                          setQuery(
+                            event.target.value
+                          )
                         }
                         placeholder="Search teams or matchups"
                       />
@@ -948,7 +1310,8 @@ export default function Home() {
                       <CircleHelp size={18} />
                       <div>
                         <strong>
-                          Live feed temporarily unavailable.
+                          Live feed temporarily
+                          unavailable.
                         </strong>
                         <div>{error}</div>
                       </div>
@@ -959,99 +1322,123 @@ export default function Home() {
                     <table>
                       <thead>
                         <tr>
-                          <th>MATCHUP / KICKOFF</th>
-                          <th>AVAILABLE CONTRACTS</th>
-                          <th>MARKET TYPES</th>
+                          <th>
+                            MATCHUP / KICKOFF
+                          </th>
+                          <th>
+                            AVAILABLE CONTRACTS
+                          </th>
+                          <th>
+                            MARKET TYPES
+                          </th>
                           <th>EXCHANGE</th>
                         </tr>
                       </thead>
 
                       <tbody>
-                        {filteredGames.map((game) => {
-                          const available = categories.filter(
-                            (item) =>
-                              game.markets.some(
-                                (market) =>
-                                  marketCategory(market) === item
-                              )
-                          );
+                        {filteredGames.map(
+                          (game) => {
+                            const available =
+                              categories.filter(
+                                (item) =>
+                                  game.markets.some(
+                                    (market) =>
+                                      marketCategory(
+                                        market
+                                      ) === item
+                                  )
+                              );
 
-                          return (
-                            <tr
-                              key={game.id}
-                              onClick={() => openGame(game)}
-                            >
-                              <td>
-                                <div className="marketname">
-                                  {game.name}
-                                </div>
+                            return (
+                              <tr
+                                key={game.id}
+                                onClick={() =>
+                                  openGame(game)
+                                }
+                              >
+                                <td>
+                                  <div className="marketname">
+                                    {game.name}
+                                  </div>
 
-                                <div
-                                  className="marketid"
-                                  style={{
-                                    color: '#b6f36c',
-                                    marginTop: 8,
-                                  }}
-                                >
-                                  {formatKickoff(game.kickoff)}
-                                </div>
+                                  <div
+                                    className="marketid"
+                                    style={{
+                                      color:
+                                        '#b6f36c',
+                                      marginTop: 8,
+                                    }}
+                                  >
+                                    {formatKickoff(
+                                      game.kickoff
+                                    )}
+                                  </div>
 
-                                <div className="marketid">
-                                  Click to explore markets →
-                                </div>
-                              </td>
+                                  <div className="marketid">
+                                    Click to explore
+                                    markets →
+                                  </div>
+                                </td>
 
-                              <td className="volume">
-                                {game.markets.length.toLocaleString()}
-                              </td>
+                                <td className="volume">
+                                  {game.markets.length.toLocaleString()}
+                                </td>
 
-                              <td>
-                                <div className="outcomes">
-                                  {available.map((item) => (
-                                    <span
-                                      key={item}
-                                      className="badge"
-                                    >
-                                      {item}
-                                    </span>
-                                  ))}
-                                </div>
-                              </td>
+                                <td>
+                                  <div className="outcomes">
+                                    {available.map(
+                                      (item) => (
+                                        <span
+                                          key={item}
+                                          className="badge"
+                                        >
+                                          {item}
+                                        </span>
+                                      )
+                                    )}
+                                  </div>
+                                </td>
 
-                              <td className="volume">
-                                Polymarket
-                              </td>
-                            </tr>
-                          );
-                        })}
+                                <td className="volume">
+                                  Polymarket
+                                </td>
+                              </tr>
+                            );
+                          }
+                        )}
                       </tbody>
                     </table>
 
-                    {!loading && !filteredGames.length && (
-                      <div className="empty">
-                        <BarChart3 size={30} />
-                        <h3>
-                          {error
-                            ? 'No live data'
-                            : 'No upcoming games found'}
-                        </h3>
-                        <p>
-                          {error
-                            ? 'Try refreshing later.'
-                            : 'Try another search or league.'}
-                        </p>
-                      </div>
-                    )}
+                    {!loading &&
+                      !filteredGames.length && (
+                        <div className="empty">
+                          <BarChart3 size={30} />
+                          <h3>
+                            {error
+                              ? 'No live data'
+                              : 'No upcoming games found'}
+                          </h3>
+                          <p>
+                            {error
+                              ? 'Try refreshing later.'
+                              : 'Try another search or league.'}
+                          </p>
+                        </div>
+                      )}
 
-                    {loading && !games.length && (
-                      <div className="empty">
-                        <RefreshCw
-                          size={25}
-                          className="spin"
-                        />
-                        <p>Loading upcoming matchups…</p>
-                      </div>
-                    )}
+                    {loading &&
+                      !games.length && (
+                        <div className="empty">
+                          <RefreshCw
+                            size={25}
+                            className="spin"
+                          />
+                          <p>
+                            Loading upcoming
+                            matchups…
+                          </p>
+                        </div>
+                      )}
                   </div>
                 </>
               ) : (
@@ -1060,7 +1447,9 @@ export default function Home() {
                     <div>
                       <button
                         className="backbutton"
-                        onClick={() => setSelectedGameId(null)}
+                        onClick={() =>
+                          setSelectedGameId(null)
+                        }
                       >
                         <ArrowLeft size={16} />
                         Back to matchups
@@ -1070,15 +1459,23 @@ export default function Home() {
                         {league} MATCHUP DETAILS
                       </div>
 
-                      <h2>{selectedGame.name}</h2>
+                      <h2>
+                        {selectedGame.name}
+                      </h2>
 
                       <p className="muted">
-                        {formatKickoff(selectedGame.kickoff)}
+                        {formatKickoff(
+                          selectedGame.kickoff
+                        )}
                       </p>
 
                       <p className="muted">
-                        {selectedGame.markets.length} available
-                        contracts · Polymarket
+                        {
+                          selectedGame.markets
+                            .length
+                        }{' '}
+                        available contracts ·
+                        Polymarket
                       </p>
                     </div>
                   </div>
@@ -1087,13 +1484,16 @@ export default function Home() {
                     style={{
                       display: 'flex',
                       alignItems: 'center',
-                      justifyContent: 'space-between',
+                      justifyContent:
+                        'space-between',
                       flexWrap: 'wrap',
                       gap: 12,
                       marginBottom: 20,
                     }}
                   >
-                    <div className="eyebrow">DISPLAY PRICES AS</div>
+                    <div className="eyebrow">
+                      DISPLAY PRICES AS
+                    </div>
 
                     <div
                       style={{
@@ -1101,25 +1501,36 @@ export default function Home() {
                         gap: 6,
                         padding: 4,
                         borderRadius: 8,
-                        border: '1px solid #343a40',
+                        border:
+                          '1px solid #343a40',
                         background: '#191d21',
                       }}
                     >
                       <button
-                        onClick={() => changeOddsFormat('probability')}
-                        aria-pressed={oddsFormat === 'probability'}
+                        onClick={() =>
+                          changeOddsFormat(
+                            'probability'
+                          )
+                        }
+                        aria-pressed={
+                          oddsFormat ===
+                          'probability'
+                        }
                         style={{
-                          padding: '9px 14px',
+                          padding:
+                            '9px 14px',
                           borderRadius: 6,
                           border: 'none',
                           cursor: 'pointer',
                           fontWeight: 600,
                           background:
-                            oddsFormat === 'probability'
+                            oddsFormat ===
+                            'probability'
                               ? '#b6f36c'
                               : 'transparent',
                           color:
-                            oddsFormat === 'probability'
+                            oddsFormat ===
+                            'probability'
                               ? '#151a13'
                               : '#c7cbd0',
                         }}
@@ -1128,20 +1539,30 @@ export default function Home() {
                       </button>
 
                       <button
-                        onClick={() => changeOddsFormat('american')}
-                        aria-pressed={oddsFormat === 'american'}
+                        onClick={() =>
+                          changeOddsFormat(
+                            'american'
+                          )
+                        }
+                        aria-pressed={
+                          oddsFormat ===
+                          'american'
+                        }
                         style={{
-                          padding: '9px 14px',
+                          padding:
+                            '9px 14px',
                           borderRadius: 6,
                           border: 'none',
                           cursor: 'pointer',
                           fontWeight: 600,
                           background:
-                            oddsFormat === 'american'
+                            oddsFormat ===
+                            'american'
                               ? '#b6f36c'
                               : 'transparent',
                           color:
-                            oddsFormat === 'american'
+                            oddsFormat ===
+                            'american'
                               ? '#151a13'
                               : '#c7cbd0',
                         }}
@@ -1153,9 +1574,13 @@ export default function Home() {
 
                   <div className="market-tabs">
                     {categories.map((item) => {
-                      const count = selectedGame.markets.filter(
-                        (market) => marketCategory(market) === item
-                      ).length;
+                      const count =
+                        selectedGame.markets.filter(
+                          (market) =>
+                            marketCategory(
+                              market
+                            ) === item
+                        ).length;
 
                       return (
                         <button
@@ -1165,7 +1590,9 @@ export default function Home() {
                               ? 'market-tab selected'
                               : 'market-tab'
                           }
-                          onClick={() => setCategory(item)}
+                          onClick={() =>
+                            changeCategory(item)
+                          }
                         >
                           {item}
                           <span>{count}</span>
@@ -1174,102 +1601,197 @@ export default function Home() {
                     })}
                   </div>
 
-                  <div className="tablewrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>MARKET / BETTING LINE</th>
-                          <th>
-                            OUTCOMES &{' '}
-                            {oddsFormat === 'american'
-                              ? 'AMERICAN ODDS'
-                              : 'IMPLIED PROBABILITY'}
-                          </th>
-                          <th>VOLUME</th>
-                          <th>WATCH</th>
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {selectedMarkets.map((market, index) => {
-                          const id = marketId(market) || String(index);
-
-                          return (
-                            <tr key={id}>
-                              <td>
-                                <div className="marketname">
-                                  {marketName(market)}
-                                </div>
-
-                                {market.line !== null &&
-                                  market.line !== undefined && (
-                                    <div className="marketid">
-                                      Line: {market.line}
-                                    </div>
-                                  )}
-                              </td>
-
-                              <td>
-                                <div className="outcomes">
-                                  {(market.outcomes || []).map(
-                                    (outcome, outcomeIndex) => (
-                                      <span
-                                        className="outcome"
-                                        key={outcomeIndex}
-                                      >
-                                        {outcome.name ||
-                                          outcome.label ||
-                                          `Outcome ${outcomeIndex + 1}`}
-
-                                        <strong>
-                                          {formatPrice(
-                                            outcome.price,
-                                            oddsFormat
-                                          )}
-                                        </strong>
-                                      </span>
-                                    )
-                                  )}
-                                </div>
-                              </td>
-
-                              <td className="volume">
-                                {money(market.volume)}
-                              </td>
-
-                              <td>
-                                <button
-                                  className={
-                                    'star ' +
-                                    (watch.includes(id)
-                                      ? 'saved'
-                                      : '')
-                                  }
-                                  onClick={() => toggleWatch(id)}
-                                  title="Toggle watchlist"
-                                >
-                                  {watch.includes(id) ? '★' : '☆'}
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-
-                    {!selectedMarkets.length && (
-                      <div className="empty">
-                        <BarChart3 size={30} />
-                        <h3>No contracts in this category</h3>
-                        <p>Try another market type.</p>
+                  {category === 'Player Props' && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent:
+                          'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: 12,
+                        padding: '14px 4px',
+                      }}
+                    >
+                      <div className="muted">
+                        {showAllProps
+                          ? `Showing all ${selectedMarkets.length} player props`
+                          : `Showing up to ${DEFAULT_PROP_LIMIT} of ${selectedMarkets.length} player props`}
+                        {' · '}
+                        Highest-volume contracts
+                        first
                       </div>
-                    )}
-                  </div>
+
+                      {selectedMarkets.length >
+                        DEFAULT_PROP_LIMIT && (
+                        <button
+                          className="refresh"
+                          onClick={() =>
+                            setShowAllProps(
+                              !showAllProps
+                            )
+                          }
+                        >
+                          {showAllProps
+                            ? 'Show Less'
+                            : `Show All ${selectedMarkets.length} Props`}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {category === 'Player Props' ? (
+                    <>
+                      {visiblePlayerGroups.map(
+                        (group) => (
+                          <div
+                            key={group.name}
+                            style={{
+                              marginBottom: 24,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent:
+                                  'space-between',
+                                padding:
+                                  '14px 16px',
+                                background:
+                                  '#20262a',
+                                border:
+                                  '1px solid #343a40',
+                                borderRadius:
+                                  '8px 8px 0 0',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 15,
+                                }}
+                              >
+                                {group.name}
+                              </div>
+
+                              <div className="muted">
+                                {
+                                  group.markets
+                                    .length
+                                }{' '}
+                                props
+                              </div>
+                            </div>
+
+                            <div className="tablewrap">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>
+                                      PLAYER PROP /
+                                      LINE
+                                    </th>
+                                    <th>
+                                      {oddsFormat ===
+                                      'american'
+                                        ? 'AMERICAN ODDS'
+                                        : 'IMPLIED PROBABILITY'}
+                                    </th>
+                                    <th>
+                                      VOLUME
+                                    </th>
+                                    <th>
+                                      WATCH
+                                    </th>
+                                  </tr>
+                                </thead>
+
+                                <tbody>
+                                  {group.markets.map(
+                                    (
+                                      market,
+                                      index
+                                    ) =>
+                                      renderMarketRow(
+                                        market,
+                                        index
+                                      )
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )
+                      )}
+
+                      {!selectedMarkets.length && (
+                        <div className="empty">
+                          <BarChart3 size={30} />
+                          <h3>
+                            No player props
+                            available
+                          </h3>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="tablewrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>
+                              MARKET / BETTING LINE
+                            </th>
+                            <th>
+                              OUTCOMES &{' '}
+                              {oddsFormat ===
+                              'american'
+                                ? 'AMERICAN ODDS'
+                                : 'IMPLIED PROBABILITY'}
+                            </th>
+                            <th>VOLUME</th>
+                            <th>WATCH</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {selectedMarkets.map(
+                            (
+                              market,
+                              index
+                            ) =>
+                              renderMarketRow(
+                                market,
+                                index
+                              )
+                          )}
+                        </tbody>
+                      </table>
+
+                      {!selectedMarkets.length && (
+                        <div className="empty">
+                          <BarChart3 size={30} />
+                          <h3>
+                            No contracts in this
+                            category
+                          </h3>
+                          <p>
+                            Try another market
+                            type.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
 
               <div className="panelbottom">
-                <span>Source: Polymarket Gamma API · Read-only</span>
+                <span>
+                  Source: Polymarket Gamma API ·
+                  Read-only
+                </span>
                 <span>
                   {oddsFormat === 'american'
                     ? 'American odds are calculated equivalents, not executable quotes'
@@ -1280,13 +1802,16 @@ export default function Home() {
           )}
 
           <div className="disclaimer">
-            LineShift is an independent demo dashboard and is not
-            affiliated with Polymarket. Market-implied probabilities
-            are not guaranteed outcomes. American odds are mathematical
-            conversions of displayed probabilities, not sportsbook
-            quotes. Displayed prices may differ from executable
-            order-book quotes. This application does not place trades
-            or provide financial advice.
+            LineShift is an independent demo
+            dashboard and is not affiliated with
+            Polymarket. Market-implied probabilities
+            are not guaranteed outcomes. American
+            odds are mathematical conversions of
+            displayed probabilities, not sportsbook
+            quotes. Displayed prices may differ from
+            executable order-book quotes. This
+            application does not place trades or
+            provide financial advice.
           </div>
         </div>
       </main>
