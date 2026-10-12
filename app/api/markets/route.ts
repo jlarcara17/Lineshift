@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-const POLYMARKET_API = 'https://gamma-api.polymarket.com';
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+const CLOB_API = 'https://clob.polymarket.com';
 
 const SERIES_IDS: Record<string, string> = {
   NFL: '12185',
@@ -14,6 +15,7 @@ type PolymarketMarket = {
   slug?: string;
   outcomes?: string | string[];
   outcomePrices?: string | string[];
+  clobTokenIds?: string | string[];
   volume?: string | number;
   active?: boolean;
   closed?: boolean;
@@ -31,6 +33,16 @@ type PolymarketEvent = {
   endDate?: string;
   gameStartTime?: string;
   markets?: PolymarketMarket[];
+};
+
+type OrderBookLevel = {
+  price?: string | number;
+  size?: string | number;
+};
+
+type OrderBook = {
+  bids?: OrderBookLevel[];
+  asks?: OrderBookLevel[];
 };
 
 function parseArray(value: unknown): string[] {
@@ -51,6 +63,32 @@ function parseArray(value: unknown): string[] {
   }
 
   return [];
+}
+
+function validPrice(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) &&
+    number >= 0 &&
+    number <= 1
+    ? number
+    : null;
+}
+
+function validSize(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) && number >= 0
+    ? number
+    : null;
 }
 
 function classifyMarket(market: PolymarketMarket): string {
@@ -109,8 +147,6 @@ function validDate(value: unknown): string | null {
 }
 
 function getKickoff(event: PolymarketEvent): string | null {
-  // gameStartTime is the actual scheduled kickoff.
-  // startDate is the market creation/opening date, NOT kickoff.
   const eventKickoff = validDate(event.gameStartTime);
 
   if (eventKickoff) {
@@ -128,12 +164,94 @@ function getKickoff(event: PolymarketEvent): string | null {
   return null;
 }
 
+async function getOrderBook(tokenId: string) {
+  try {
+    const endpoint =
+      `${CLOB_API}/book?` +
+      new URLSearchParams({
+        token_id: tokenId,
+      }).toString();
+
+    const response = await fetch(endpoint, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const book: OrderBook = await response.json();
+
+    const bids = (book.bids || [])
+      .map((level) => ({
+        price: validPrice(level.price),
+        size: validSize(level.size),
+      }))
+      .filter(
+        (level) =>
+          level.price !== null && level.size !== null
+      );
+
+    const asks = (book.asks || [])
+      .map((level) => ({
+        price: validPrice(level.price),
+        size: validSize(level.size),
+      }))
+      .filter(
+        (level) =>
+          level.price !== null && level.size !== null
+      );
+
+    const bestBid =
+      bids.length > 0
+        ? Math.max(...bids.map((level) => level.price!))
+        : null;
+
+    const bestAsk =
+      asks.length > 0
+        ? Math.min(...asks.map((level) => level.price!))
+        : null;
+
+    const bestBidSize =
+      bestBid === null
+        ? null
+        : bids
+            .filter((level) => level.price === bestBid)
+            .reduce((sum, level) => sum + level.size!, 0);
+
+    const bestAskSize =
+      bestAsk === null
+        ? null
+        : asks
+            .filter((level) => level.price === bestAsk)
+            .reduce((sum, level) => sum + level.size!, 0);
+
+    return {
+      bestBid,
+      bestAsk,
+      bestBidSize,
+      bestAskSize,
+      spread:
+        bestBid !== null && bestAsk !== null
+          ? Number((bestAsk - bestBid).toFixed(4))
+          : null,
+      hasBuyLiquidity: bestAsk !== null && bestAskSize !== null && bestAskSize > 0,
+      hasSellLiquidity: bestBid !== null && bestBidSize !== null && bestBidSize > 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
 
   const league = (
     url.searchParams.get('league') || 'NFL'
   ).toUpperCase();
+
+  const quotesFor = url.searchParams.get('quotesFor');
 
   if (!/^[A-Z0-9]{2,12}$/.test(league)) {
     return NextResponse.json(
@@ -155,7 +273,7 @@ export async function GET(request: Request) {
 
   try {
     const endpoint =
-      `${POLYMARKET_API}/events?` +
+      `${GAMMA_API}/events?` +
       new URLSearchParams({
         series_id: seriesId,
         active: 'true',
@@ -169,13 +287,17 @@ export async function GET(request: Request) {
     });
 
     if (!response.ok) {
-      throw new Error(`Polymarket returned ${response.status}`);
+      throw new Error(
+        `Polymarket returned ${response.status}`
+      );
     }
 
     const payload: unknown = await response.json();
 
     if (!Array.isArray(payload)) {
-      throw new Error('Unexpected Polymarket response format');
+      throw new Error(
+        'Unexpected Polymarket response format'
+      );
     }
 
     const now = Date.now();
@@ -185,72 +307,101 @@ export async function GET(request: Request) {
         event,
         kickoff: getKickoff(event),
       }))
-      .filter(({ kickoff }) => {
-        // Only show games with a verified future kickoff time.
-        if (!kickoff) return false;
-
-        return Date.parse(kickoff) > now;
-      })
+      .filter(
+        ({ kickoff }) =>
+          !!kickoff && Date.parse(kickoff) > now
+      )
       .sort(
         (a, b) =>
-          Date.parse(a.kickoff!) - Date.parse(b.kickoff!)
+          Date.parse(a.kickoff!) -
+          Date.parse(b.kickoff!)
       );
 
-    const markets = events.flatMap(({ event, kickoff }) =>
-      (event.markets || [])
-        .filter((market) => market.closed !== true)
-        .map((market) => {
-          const outcomes = parseArray(market.outcomes);
-          const prices = parseArray(market.outcomePrices);
+    const markets = events.flatMap(
+      ({ event, kickoff }) =>
+        (event.markets || [])
+          .filter((market) => market.closed !== true)
+          .map((market) => {
+            const outcomes = parseArray(market.outcomes);
+            const prices = parseArray(market.outcomePrices);
+            const tokenIds = parseArray(market.clobTokenIds);
 
-          return {
-            marketId: `polymarket:${market.id}`,
-            eventId: String(event.id || ''),
-            eventName: event.title || 'Unknown matchup',
-            eventSlug: event.slug || '',
-
-            // This is the actual scheduled kickoff time.
-            gameStartTime: kickoff,
-
-            // Retain the original market start date separately.
-            startDate: event.startDate || null,
-
-            name:
-              market.question ||
-              event.title ||
-              'Untitled market',
-
-            marketType: classifyMarket(market),
-            sportsMarketType: market.sportsMarketType || null,
-            line: market.line ?? null,
-            groupItemTitle: market.groupItemTitle || null,
-            source: 'Polymarket',
-            volume: market.volume,
-
-            outcomes: outcomes.map((name, index) => {
-              const rawPrice = prices[index];
-              const numericPrice = Number(rawPrice);
-
-              return {
+            return {
+              marketId: `polymarket:${market.id}`,
+              eventId: String(event.id || ''),
+              eventName: event.title || 'Unknown matchup',
+              eventSlug: event.slug || '',
+              gameStartTime: kickoff,
+              startDate: event.startDate || null,
+              name:
+                market.question ||
+                event.title ||
+                'Untitled market',
+              marketType: classifyMarket(market),
+              sportsMarketType:
+                market.sportsMarketType || null,
+              line: market.line ?? null,
+              groupItemTitle:
+                market.groupItemTitle || null,
+              source: 'Polymarket',
+              volume: market.volume,
+              outcomes: outcomes.map((name, index) => ({
                 outcomeId: String(index),
                 name,
-                price:
-                  rawPrice !== undefined &&
-                  Number.isFinite(numericPrice) &&
-                  numericPrice >= 0 &&
-                  numericPrice <= 1
-                    ? numericPrice
-                    : null,
-              };
-            }),
-          };
-        })
+                price: validPrice(prices[index]),
+                tokenId: tokenIds[index] || null,
+              })),
+            };
+          })
+    );
+
+    // Normal dashboard requests stay fast.
+    // Order books are fetched only when a specific
+    // market is requested using quotesFor.
+    if (!quotesFor) {
+      return NextResponse.json({
+        markets,
+        updatedAt: new Date().toISOString(),
+        source: 'Polymarket',
+      });
+    }
+
+    const selectedMarket = markets.find(
+      (market) => market.marketId === quotesFor
+    );
+
+    if (!selectedMarket) {
+      return NextResponse.json(
+        { error: 'Market not found' },
+        { status: 404 }
+      );
+    }
+
+    const outcomesWithQuotes = await Promise.all(
+      selectedMarket.outcomes.map(async (outcome) => {
+        const orderBook = outcome.tokenId
+          ? await getOrderBook(outcome.tokenId)
+          : null;
+
+        return {
+          ...outcome,
+          orderBook,
+          quoteStatus: orderBook
+            ? 'order_book_available'
+            : 'order_book_unavailable',
+        };
+      })
     );
 
     return NextResponse.json({
-      markets,
+      market: {
+        ...selectedMarket,
+        outcomes: outcomesWithQuotes,
+      },
       updatedAt: new Date().toISOString(),
-      source: 'Polymarket',
+      source: 'Polymarket CLOB',
+      note:
+        'Best bids and asks are snapshots, not guaranteed execution prices. Available sizes may change.',
     });
   } catch (error) {
     return NextResponse.json(
