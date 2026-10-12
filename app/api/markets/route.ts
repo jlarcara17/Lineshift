@@ -20,6 +20,7 @@ type PolymarketMarket = {
   groupItemTitle?: string;
   sportsMarketType?: string;
   line?: number | string;
+  gameStartTime?: string;
 };
 
 type PolymarketEvent = {
@@ -27,6 +28,8 @@ type PolymarketEvent = {
   title?: string;
   slug?: string;
   startDate?: string;
+  endDate?: string;
+  gameStartTime?: string;
   markets?: PolymarketMarket[];
 };
 
@@ -55,11 +58,14 @@ function classifyMarket(market: PolymarketMarket): string {
   const type = (market.sportsMarketType || '').toLowerCase();
 
   if (
-    type.includes('moneyline') ||
-    question.includes('moneyline') ||
-    question.includes('winner')
+    question.includes('passing yards') ||
+    question.includes('rushing yards') ||
+    question.includes('receiving yards') ||
+    question.includes('receptions') ||
+    question.includes('touchdown') ||
+    type.includes('player')
   ) {
-    return 'Moneyline';
+    return 'Player Props';
   }
 
   if (
@@ -73,22 +79,53 @@ function classifyMarket(market: PolymarketMarket): string {
   if (
     type.includes('total') ||
     question.includes('total points') ||
-    question.includes('over/under')
+    question.includes('over/under') ||
+    question.includes('o/u')
   ) {
     return 'Totals';
   }
 
   if (
-    question.includes('passing yards') ||
-    question.includes('rushing yards') ||
-    question.includes('receiving yards') ||
-    question.includes('touchdown') ||
-    type.includes('player')
+    type.includes('moneyline') ||
+    question.includes('moneyline') ||
+    question.includes('winner')
   ) {
-    return 'Player Props';
+    return 'Moneyline';
   }
 
   return 'Other';
+}
+
+function validDate(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+
+  const timestamp = Date.parse(value);
+
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : null;
+}
+
+function getKickoff(event: PolymarketEvent): string | null {
+  // gameStartTime is the actual scheduled kickoff.
+  // startDate is the market creation/opening date, NOT kickoff.
+  const eventKickoff = validDate(event.gameStartTime);
+
+  if (eventKickoff) {
+    return eventKickoff;
+  }
+
+  for (const market of event.markets || []) {
+    const marketKickoff = validDate(market.gameStartTime);
+
+    if (marketKickoff) {
+      return marketKickoff;
+    }
+  }
+
+  return null;
 }
 
 export async function GET(request: Request) {
@@ -141,9 +178,25 @@ export async function GET(request: Request) {
       throw new Error('Unexpected Polymarket response format');
     }
 
-    const events = payload as PolymarketEvent[];
+    const now = Date.now();
 
-    const markets = events.flatMap((event) =>
+    const events = (payload as PolymarketEvent[])
+      .map((event) => ({
+        event,
+        kickoff: getKickoff(event),
+      }))
+      .filter(({ kickoff }) => {
+        // Only show games with a verified future kickoff time.
+        if (!kickoff) return false;
+
+        return Date.parse(kickoff) > now;
+      })
+      .sort(
+        (a, b) =>
+          Date.parse(a.kickoff!) - Date.parse(b.kickoff!)
+      );
+
+    const markets = events.flatMap(({ event, kickoff }) =>
       (event.markets || [])
         .filter((market) => market.closed !== true)
         .map((market) => {
@@ -155,14 +208,25 @@ export async function GET(request: Request) {
             eventId: String(event.id || ''),
             eventName: event.title || 'Unknown matchup',
             eventSlug: event.slug || '',
+
+            // This is the actual scheduled kickoff time.
+            gameStartTime: kickoff,
+
+            // Retain the original market start date separately.
             startDate: event.startDate || null,
-            name: market.question || event.title || 'Untitled market',
+
+            name:
+              market.question ||
+              event.title ||
+              'Untitled market',
+
             marketType: classifyMarket(market),
             sportsMarketType: market.sportsMarketType || null,
             line: market.line ?? null,
             groupItemTitle: market.groupItemTitle || null,
             source: 'Polymarket',
             volume: market.volume,
+
             outcomes: outcomes.map((name, index) => {
               const rawPrice = prices[index];
               const numericPrice = Number(rawPrice);
