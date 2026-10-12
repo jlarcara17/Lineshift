@@ -5,6 +5,8 @@ import {
   Activity,
   ArrowLeft,
   BarChart3,
+  ChevronDown,
+  ChevronUp,
   CircleHelp,
   ExternalLink,
   RefreshCw,
@@ -78,12 +80,26 @@ type Category =
 
 type OddsFormat = 'probability' | 'american';
 
+type PlayerGroup = {
+  name: string;
+  markets: Market[];
+  totalVolume: number;
+};
+
 const historyKey = 'lineshift-history-v1';
 const picksKey = 'lineshift-weekly-picks-v1';
 const watchKey = 'lineshift-watch';
 const oddsKey = 'lineshift-odds-format-v1';
 
-const leagues = ['NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAAB', 'EPL'];
+const leagues = [
+  'NFL',
+  'NBA',
+  'MLB',
+  'NHL',
+  'NCAAF',
+  'NCAAB',
+  'EPL',
+];
 
 const categories: Category[] = [
   'Moneyline',
@@ -93,10 +109,13 @@ const categories: Category[] = [
   'Other',
 ];
 
-const DEFAULT_PROP_LIMIT = 25;
+const DEFAULT_PLAYER_LIMIT = 10;
+const DEFAULT_PROPS_PER_PLAYER = 3;
 
 function numericProbability(raw: unknown): number | null {
-  if (raw === null || raw === undefined || raw === '') return null;
+  if (raw === null || raw === undefined || raw === '') {
+    return null;
+  }
 
   const value = Number(raw);
 
@@ -132,8 +151,13 @@ function americanOdds(raw: unknown): string {
   return rounded > 0 ? `+${rounded}` : String(rounded);
 }
 
-function formatPrice(raw: unknown, format: OddsFormat): string {
-  return format === 'american' ? americanOdds(raw) : price(raw);
+function formatPrice(
+  raw: unknown,
+  format: OddsFormat
+): string {
+  return format === 'american'
+    ? americanOdds(raw)
+    : price(raw);
 }
 
 function money(raw: unknown): string {
@@ -166,7 +190,9 @@ function kickoffTimestamp(
 
   const timestamp = Date.parse(value);
 
-  return Number.isFinite(timestamp) ? timestamp : Infinity;
+  return Number.isFinite(timestamp)
+    ? timestamp
+    : Infinity;
 }
 
 function formatKickoff(
@@ -225,7 +251,7 @@ function marketCategory(market: Market): Category {
   if (
     type.includes('player') ||
     sportsType.includes('player') ||
-    /passing yards|rushing yards|receiving yards|receptions|anytime touchdown|first touchdown|player to score/.test(
+    /passing yards|rushing yards|receiving yards|receptions|anytime touchdown|first touchdown|player to score|to score a touchdown|td scorer/.test(
       question
     )
   ) {
@@ -300,51 +326,146 @@ function groupGames(markets: Market[]): Game[] {
   });
 }
 
-// Extract the player name from common Polymarket prop titles.
-function playerName(market: Market): string {
-  const title = marketName(market).trim();
+function isAnytimeTouchdown(market: Market): boolean {
+  const text = [
+    marketName(market),
+    market.groupItemTitle || '',
+    market.sportsMarketType || '',
+  ]
+    .join(' ')
+    .toLowerCase();
 
-  const colonIndex = title.indexOf(':');
-
-  if (colonIndex > 0) {
-    return title.slice(0, colonIndex).trim();
-  }
-
-  const patterns = [
-    /\s+(?:Passing Yards|Rushing Yards|Receiving Yards|Receptions)\b/i,
-    /\s+(?:Anytime Touchdown|First Touchdown)\b/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = title.match(pattern);
-
-    if (match && match.index !== undefined && match.index > 0) {
-      return title.slice(0, match.index).trim();
-    }
-  }
-
-  return 'Other Player Props';
+  return /anytime.*(?:touchdown|td)|(?:touchdown|td).*anytime|to score (?:a |an )?touchdown/.test(
+    text
+  );
 }
 
 function volumeNumber(market: Market): number {
   const value = Number(market.volume);
 
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  return Number.isFinite(value) && value > 0
+    ? value
+    : 0;
 }
 
-function sortPropsByVolume(markets: Market[]): Market[] {
-  return [...markets].sort(
-    (a, b) => volumeNumber(b) - volumeNumber(a)
-  );
+function playerName(market: Market): string {
+  const title = marketName(market).trim();
+  const groupTitle = (
+    market.groupItemTitle || ''
+  ).trim();
+
+  const text = title || groupTitle;
+
+  const colonIndex = text.indexOf(':');
+
+  if (colonIndex > 0) {
+    return text.slice(0, colonIndex).trim();
+  }
+
+  const patterns = [
+    /\s+(?:Passing Yards|Rushing Yards|Receiving Yards|Receptions)\b/i,
+    /\s+(?:Anytime Touchdown|First Touchdown|Anytime TD|First TD)\b/i,
+    /\s+(?:to score (?:a |an )?touchdown)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+
+    if (
+      match &&
+      match.index !== undefined &&
+      match.index > 0
+    ) {
+      return text.slice(0, match.index).trim();
+    }
+  }
+
+  if (groupTitle && groupTitle !== text) {
+    const groupMatch = groupTitle.match(
+      /^(.+?)\s+(?:Passing|Rushing|Receiving|Receptions|Touchdown)/i
+    );
+
+    if (groupMatch) return groupMatch[1].trim();
+  }
+
+  return 'Other Player Props';
 }
 
-type PlayerGroup = {
-  name: string;
-  markets: Market[];
-  totalVolume: number;
-};
+function propType(market: Market): string {
+  const name = marketName(market).toLowerCase();
 
-function groupPlayerProps(markets: Market[]): PlayerGroup[] {
+  if (isAnytimeTouchdown(market)) {
+    return 'Anytime TD';
+  }
+
+  if (name.includes('passing yards')) {
+    return 'Passing Yards';
+  }
+
+  if (name.includes('rushing yards')) {
+    return 'Rushing Yards';
+  }
+
+  if (name.includes('receiving yards')) {
+    return 'Receiving Yards';
+  }
+
+  if (name.includes('receptions')) {
+    return 'Receptions';
+  }
+
+  if (name.includes('first touchdown')) {
+    return 'First TD';
+  }
+
+  return 'Other';
+}
+
+function prioritizePlayerProps(
+  markets: Market[]
+): Market[] {
+  const sorted = [...markets].sort((a, b) => {
+    const aTD = isAnytimeTouchdown(a) ? 1 : 0;
+    const bTD = isAnytimeTouchdown(b) ? 1 : 0;
+
+    if (aTD !== bTD) return bTD - aTD;
+
+    return volumeNumber(b) - volumeNumber(a);
+  });
+
+  // Choose different prop types first so alternate
+  // receiving-yard lines do not fill all three slots.
+  const featured: Market[] = [];
+  const usedTypes = new Set<string>();
+  const remaining: Market[] = [];
+
+  for (const market of sorted) {
+    const type = propType(market);
+
+    if (
+      !usedTypes.has(type) &&
+      featured.length < DEFAULT_PROPS_PER_PLAYER
+    ) {
+      featured.push(market);
+      usedTypes.add(type);
+    } else {
+      remaining.push(market);
+    }
+  }
+
+  while (
+    featured.length < DEFAULT_PROPS_PER_PLAYER &&
+    remaining.length > 0
+  ) {
+    featured.push(remaining.shift()!);
+  }
+
+  return [...featured, ...remaining];
+}
+
+function groupPlayerProps(
+  markets: Market[]
+): PlayerGroup[] {
   const groups = new Map<string, PlayerGroup>();
 
   for (const market of markets) {
@@ -368,13 +489,23 @@ function groupPlayerProps(markets: Market[]): PlayerGroup[] {
   return Array.from(groups.values())
     .map((group) => ({
       ...group,
-      markets: sortPropsByVolume(group.markets),
+      markets: prioritizePlayerProps(group.markets),
     }))
-    .sort(
-      (a, b) =>
+    .sort((a, b) => {
+      const aTD = a.markets.some(isAnytimeTouchdown)
+        ? 1
+        : 0;
+      const bTD = b.markets.some(isAnytimeTouchdown)
+        ? 1
+        : 0;
+
+      if (aTD !== bTD) return bTD - aTD;
+
+      return (
         b.totalVolume - a.totalVolume ||
         a.name.localeCompare(b.name)
-    );
+      );
+    });
 }
 
 function buildSignals(
@@ -392,12 +523,17 @@ function buildSignals(
     for (const [index, outcome] of (
       market.outcomes || []
     ).entries()) {
-      const id = `${league}:${mid}:${outcome.outcomeId || index}`;
+      const id = `${league}:${mid}:${
+        outcome.outcomeId || index
+      }`;
+
       const ticks = history[id] || [];
 
       if (
         ticks.length < 2 ||
-        ticks[ticks.length - 1].at - ticks[0].at < 60000
+        ticks[ticks.length - 1].at -
+          ticks[0].at <
+          60000
       ) {
         continue;
       }
@@ -458,18 +594,29 @@ export default function Home() {
   const [onlyWatch, setOnlyWatch] = useState(false);
   const [oddsFormat, setOddsFormat] =
     useState<OddsFormat>('probability');
-  const [showAllProps, setShowAllProps] = useState(false);
+
+  const [showAllPlayers, setShowAllPlayers] =
+    useState(false);
+
+  const [expandedPlayers, setExpandedPlayers] =
+    useState<string[]>([]);
 
   useEffect(() => {
     try {
       setWatch(
         JSON.parse(localStorage.getItem(watchKey) || '[]')
       );
+
       setHistory(
-        JSON.parse(localStorage.getItem(historyKey) || '{}')
+        JSON.parse(
+          localStorage.getItem(historyKey) || '{}'
+        )
       );
+
       setPicks(
-        JSON.parse(localStorage.getItem(picksKey) || '[]')
+        JSON.parse(
+          localStorage.getItem(picksKey) || '[]'
+        )
       );
 
       const savedFormat = localStorage.getItem(oddsKey);
@@ -512,7 +659,9 @@ export default function Home() {
         );
       }
 
-      const incoming: Market[] = Array.isArray(data.markets)
+      const incoming: Market[] = Array.isArray(
+        data.markets
+      )
         ? data.markets
         : [];
 
@@ -540,12 +689,15 @@ export default function Home() {
             const id = `${league}:${mid}:${
               outcome.outcomeId || index
             }`;
+
             const old = next[id] || [];
 
             if (
               !old.length ||
-              old[old.length - 1].prob !== probability ||
-              now - old[old.length - 1].at >= 60000
+              old[old.length - 1].prob !==
+                probability ||
+              now - old[old.length - 1].at >=
+                60000
             ) {
               next[id] = [
                 ...old,
@@ -613,14 +765,15 @@ export default function Home() {
             marketCategory(market)
               .toLowerCase()
               .includes(search) ||
-            (market.outcomes || []).some((outcome) =>
-              (
-                outcome.name ||
-                outcome.label ||
-                ''
-              )
-                .toLowerCase()
-                .includes(search)
+            (market.outcomes || []).some(
+              (outcome) =>
+                (
+                  outcome.name ||
+                  outcome.label ||
+                  ''
+                )
+                  .toLowerCase()
+                  .includes(search)
             )
         );
 
@@ -636,8 +789,9 @@ export default function Home() {
 
   const selectedGame = useMemo(
     () =>
-      games.find((game) => game.id === selectedGameId) ||
-      null,
+      games.find(
+        (game) => game.id === selectedGameId
+      ) || null,
     [games, selectedGameId]
   );
 
@@ -657,31 +811,22 @@ export default function Home() {
     [selectedMarkets]
   );
 
-  const visiblePlayerGroups = useMemo(() => {
-    if (showAllProps) return playerGroups;
+  const visiblePlayerGroups = useMemo(
+    () =>
+      showAllPlayers
+        ? playerGroups
+        : playerGroups.slice(0, DEFAULT_PLAYER_LIMIT),
+    [playerGroups, showAllPlayers]
+  );
 
-    let remaining = DEFAULT_PROP_LIMIT;
-
-    return playerGroups
-      .map((group) => {
-        const visibleMarkets = group.markets.slice(
-          0,
-          remaining
-        );
-
-        remaining -= visibleMarkets.length;
-
-        return {
-          ...group,
-          markets: visibleMarkets,
-        };
-      })
-      .filter((group) => group.markets.length > 0);
-  }, [playerGroups, showAllProps]);
+  function resetPlayerView() {
+    setShowAllPlayers(false);
+    setExpandedPlayers([]);
+  }
 
   function openGame(game: Game) {
     setSelectedGameId(game.id);
-    setShowAllProps(false);
+    resetPlayerView();
 
     const firstAvailable = categories.find((item) =>
       game.markets.some(
@@ -697,12 +842,20 @@ export default function Home() {
     setLeague(nextLeague);
     setSelectedGameId(null);
     setQuery('');
-    setShowAllProps(false);
+    resetPlayerView();
   }
 
   function changeCategory(nextCategory: Category) {
     setCategory(nextCategory);
-    setShowAllProps(false);
+    resetPlayerView();
+  }
+
+  function togglePlayer(name: string) {
+    setExpandedPlayers((previous) =>
+      previous.includes(name)
+        ? previous.filter((item) => item !== name)
+        : [...previous, name]
+    );
   }
 
   function toggleWatch(id: string) {
@@ -937,8 +1090,7 @@ export default function Home() {
         <header className="top">
           <div className="crumb">
             WORKSPACE <span>/</span>{' '}
-            {selectedGame &&
-            view === 'markets'
+            {selectedGame && view === 'markets'
               ? 'MATCHUP DETAILS'
               : 'MARKET OVERVIEW'}
           </div>
@@ -950,9 +1102,7 @@ export default function Home() {
                   'dot ' + (error ? 'red' : '')
                 }
               />
-              {error
-                ? 'OFFLINE'
-                : 'LIVE DATA'}
+              {error ? 'OFFLINE' : 'LIVE DATA'}
             </span>
 
             <a
@@ -960,8 +1110,7 @@ export default function Home() {
               target="_blank"
               rel="noreferrer"
             >
-              API Docs{' '}
-              <ExternalLink size={13} />
+              API Docs <ExternalLink size={13} />
             </a>
           </div>
         </header>
@@ -975,9 +1124,7 @@ export default function Home() {
 
               <h1>
                 LineShift Overview
-                <span className="headingdot">
-                  .
-                </span>
+                <span className="headingdot">.</span>
               </h1>
 
               <p>
@@ -994,9 +1141,7 @@ export default function Home() {
             >
               <RefreshCw
                 size={16}
-                className={
-                  loading ? 'spin' : ''
-                }
+                className={loading ? 'spin' : ''}
               />
               Refresh Data
             </button>
@@ -1005,7 +1150,7 @@ export default function Home() {
           <section className="stats">
             <div className="stat">
               <div className="stathead">
-                AVAILABLE MATCHUPS{' '}
+                AVAILABLE MATCHUPS
                 <BarChart3 size={18} />
               </div>
               <div className="statvalue">
@@ -1020,7 +1165,7 @@ export default function Home() {
 
             <div className="stat">
               <div className="stathead">
-                AVAILABLE CONTRACTS{' '}
+                AVAILABLE CONTRACTS
                 <TrendingUp size={18} />
               </div>
               <div className="statvalue">
@@ -1035,7 +1180,7 @@ export default function Home() {
 
             <div className="stat">
               <div className="stathead">
-                DATA CONNECTION{' '}
+                DATA CONNECTION
                 {error ? (
                   <WifiOff size={18} />
                 ) : (
@@ -1043,9 +1188,7 @@ export default function Home() {
                 )}
               </div>
               <div className="statvalue smaller">
-                {error
-                  ? 'Unavailable'
-                  : 'Connected'}
+                {error ? 'Unavailable' : 'Connected'}
               </div>
               <div className="statfoot">
                 Refreshes every 60 seconds
@@ -1054,7 +1197,7 @@ export default function Home() {
 
             <div className="stat">
               <div className="stathead">
-                TRADING MODE{' '}
+                TRADING MODE
                 <ShieldCheck size={18} />
               </div>
               <div className="statvalue smaller">
@@ -1086,8 +1229,7 @@ export default function Home() {
                   onClick={publish}
                   disabled={
                     !signals.some(
-                      (signal) =>
-                        signal.change > 0
+                      (signal) => signal.change > 0
                     )
                   }
                 >
@@ -1112,8 +1254,7 @@ export default function Home() {
                   >
                     <div className="eyebrow">
                       {signal.league} ·{' '}
-                      {signal.observations}{' '}
-                      observations
+                      {signal.observations} observations
                     </div>
 
                     <h3>{signal.label}</h3>
@@ -1144,8 +1285,7 @@ export default function Home() {
                         {signal.change > 0
                           ? '+'
                           : ''}
-                        {signal.change.toFixed(1)}{' '}
-                        pp
+                        {signal.change.toFixed(1)} pp
                       </strong>
                     </div>
                   </div>
@@ -1194,46 +1334,39 @@ export default function Home() {
               </p>
 
               <div className="signalgrid">
-                {picks.map(
-                  (signal, index) => (
-                    <div
-                      className="signalcard"
-                      key={signal.id}
-                    >
-                      <div className="eyebrow">
-                        PICK {index + 1} ·{' '}
-                        {signal.league}
-                      </div>
-
-                      <h3>{signal.label}</h3>
-
-                      <div className="muted">
-                        {signal.outcome}
-                      </div>
-
-                      <div className="signalnumbers">
-                        <span>
-                          {formatPrice(
-                            signal.current,
-                            oddsFormat
-                          )}{' '}
-                          {oddsFormat ===
-                          'probability'
-                            ? 'implied'
-                            : 'equivalent'}
-                        </span>
-
-                        <strong className="positive">
-                          +
-                          {signal.change.toFixed(
-                            1
-                          )}{' '}
-                          pp
-                        </strong>
-                      </div>
+                {picks.map((signal, index) => (
+                  <div
+                    className="signalcard"
+                    key={signal.id}
+                  >
+                    <div className="eyebrow">
+                      PICK {index + 1} ·{' '}
+                      {signal.league}
                     </div>
-                  )
-                )}
+
+                    <h3>{signal.label}</h3>
+
+                    <div className="muted">
+                      {signal.outcome}
+                    </div>
+
+                    <div className="signalnumbers">
+                      <span>
+                        {formatPrice(
+                          signal.current,
+                          oddsFormat
+                        )}{' '}
+                        {oddsFormat === 'probability'
+                          ? 'implied'
+                          : 'equivalent'}
+                      </span>
+
+                      <strong className="positive">
+                        +{signal.change.toFixed(1)} pp
+                      </strong>
+                    </div>
+                  </div>
+                ))}
 
                 {!picks.length && (
                   <div className="signalempty">
@@ -1296,9 +1429,7 @@ export default function Home() {
                       <input
                         value={query}
                         onChange={(event) =>
-                          setQuery(
-                            event.target.value
-                          )
+                          setQuery(event.target.value)
                         }
                         placeholder="Search teams or matchups"
                       />
@@ -1328,84 +1459,78 @@ export default function Home() {
                           <th>
                             AVAILABLE CONTRACTS
                           </th>
-                          <th>
-                            MARKET TYPES
-                          </th>
+                          <th>MARKET TYPES</th>
                           <th>EXCHANGE</th>
                         </tr>
                       </thead>
 
                       <tbody>
-                        {filteredGames.map(
-                          (game) => {
-                            const available =
-                              categories.filter(
-                                (item) =>
-                                  game.markets.some(
-                                    (market) =>
-                                      marketCategory(
-                                        market
-                                      ) === item
-                                  )
-                              );
-
-                            return (
-                              <tr
-                                key={game.id}
-                                onClick={() =>
-                                  openGame(game)
-                                }
-                              >
-                                <td>
-                                  <div className="marketname">
-                                    {game.name}
-                                  </div>
-
-                                  <div
-                                    className="marketid"
-                                    style={{
-                                      color:
-                                        '#b6f36c',
-                                      marginTop: 8,
-                                    }}
-                                  >
-                                    {formatKickoff(
-                                      game.kickoff
-                                    )}
-                                  </div>
-
-                                  <div className="marketid">
-                                    Click to explore
-                                    markets →
-                                  </div>
-                                </td>
-
-                                <td className="volume">
-                                  {game.markets.length.toLocaleString()}
-                                </td>
-
-                                <td>
-                                  <div className="outcomes">
-                                    {available.map(
-                                      (item) => (
-                                        <span
-                                          key={item}
-                                          className="badge"
-                                        >
-                                          {item}
-                                        </span>
-                                      )
-                                    )}
-                                  </div>
-                                </td>
-
-                                <td className="volume">
-                                  Polymarket
-                                </td>
-                              </tr>
+                        {filteredGames.map((game) => {
+                          const available =
+                            categories.filter((item) =>
+                              game.markets.some(
+                                (market) =>
+                                  marketCategory(
+                                    market
+                                  ) === item
+                              )
                             );
-                          }
-                        )}
+
+                          return (
+                            <tr
+                              key={game.id}
+                              onClick={() =>
+                                openGame(game)
+                              }
+                            >
+                              <td>
+                                <div className="marketname">
+                                  {game.name}
+                                </div>
+
+                                <div
+                                  className="marketid"
+                                  style={{
+                                    color: '#b6f36c',
+                                    marginTop: 8,
+                                  }}
+                                >
+                                  {formatKickoff(
+                                    game.kickoff
+                                  )}
+                                </div>
+
+                                <div className="marketid">
+                                  Click to explore
+                                  markets →
+                                </div>
+                              </td>
+
+                              <td className="volume">
+                                {game.markets.length.toLocaleString()}
+                              </td>
+
+                              <td>
+                                <div className="outcomes">
+                                  {available.map(
+                                    (item) => (
+                                      <span
+                                        key={item}
+                                        className="badge"
+                                      >
+                                        {item}
+                                      </span>
+                                    )
+                                  )}
+                                </div>
+                              </td>
+
+                              <td className="volume">
+                                Polymarket
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
 
@@ -1426,19 +1551,18 @@ export default function Home() {
                         </div>
                       )}
 
-                    {loading &&
-                      !games.length && (
-                        <div className="empty">
-                          <RefreshCw
-                            size={25}
-                            className="spin"
-                          />
-                          <p>
-                            Loading upcoming
-                            matchups…
-                          </p>
-                        </div>
-                      )}
+                    {loading && !games.length && (
+                      <div className="empty">
+                        <RefreshCw
+                          size={25}
+                          className="spin"
+                        />
+                        <p>
+                          Loading upcoming
+                          matchups…
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </>
               ) : (
@@ -1459,9 +1583,7 @@ export default function Home() {
                         {league} MATCHUP DETAILS
                       </div>
 
-                      <h2>
-                        {selectedGame.name}
-                      </h2>
+                      <h2>{selectedGame.name}</h2>
 
                       <p className="muted">
                         {formatKickoff(
@@ -1470,10 +1592,7 @@ export default function Home() {
                       </p>
 
                       <p className="muted">
-                        {
-                          selectedGame.markets
-                            .length
-                        }{' '}
+                        {selectedGame.markets.length}{' '}
                         available contracts ·
                         Polymarket
                       </p>
@@ -1517,8 +1636,7 @@ export default function Home() {
                           'probability'
                         }
                         style={{
-                          padding:
-                            '9px 14px',
+                          padding: '9px 14px',
                           borderRadius: 6,
                           border: 'none',
                           cursor: 'pointer',
@@ -1549,8 +1667,7 @@ export default function Home() {
                           'american'
                         }
                         style={{
-                          padding:
-                            '9px 14px',
+                          padding: '9px 14px',
                           borderRadius: 6,
                           border: 'none',
                           cursor: 'pointer',
@@ -1601,128 +1718,183 @@ export default function Home() {
                     })}
                   </div>
 
-                  {category === 'Player Props' && (
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent:
-                          'space-between',
-                        alignItems: 'center',
-                        flexWrap: 'wrap',
-                        gap: 12,
-                        padding: '14px 4px',
-                      }}
-                    >
-                      <div className="muted">
-                        {showAllProps
-                          ? `Showing all ${selectedMarkets.length} player props`
-                          : `Showing up to ${DEFAULT_PROP_LIMIT} of ${selectedMarkets.length} player props`}
-                        {' · '}
-                        Highest-volume contracts
-                        first
-                      </div>
-
-                      {selectedMarkets.length >
-                        DEFAULT_PROP_LIMIT && (
-                        <button
-                          className="refresh"
-                          onClick={() =>
-                            setShowAllProps(
-                              !showAllProps
-                            )
-                          }
-                        >
-                          {showAllProps
-                            ? 'Show Less'
-                            : `Show All ${selectedMarkets.length} Props`}
-                        </button>
-                      )}
-                    </div>
-                  )}
-
                   {category === 'Player Props' ? (
                     <>
-                      {visiblePlayerGroups.map(
-                        (group) => (
-                          <div
-                            key={group.name}
-                            style={{
-                              marginBottom: 24,
-                            }}
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent:
+                            'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: 12,
+                          padding: '16px 4px',
+                        }}
+                      >
+                        <div className="muted">
+                          Showing{' '}
+                          {visiblePlayerGroups.length}{' '}
+                          of {playerGroups.length}{' '}
+                          players · Up to 3 featured
+                          props each · Anytime TDs
+                          prioritized
+                        </div>
+
+                        {playerGroups.length >
+                          DEFAULT_PLAYER_LIMIT && (
+                          <button
+                            className="refresh"
+                            onClick={() =>
+                              setShowAllPlayers(
+                                !showAllPlayers
+                              )
+                            }
                           >
+                            {showAllPlayers
+                              ? 'Show Top 10 Players'
+                              : `Show All ${playerGroups.length} Players`}
+                          </button>
+                        )}
+                      </div>
+
+                      {visiblePlayerGroups.map(
+                        (group) => {
+                          const expanded =
+                            expandedPlayers.includes(
+                              group.name
+                            );
+
+                          const visibleMarkets =
+                            expanded
+                              ? group.markets
+                              : group.markets.slice(
+                                  0,
+                                  DEFAULT_PROPS_PER_PLAYER
+                                );
+
+                          const hiddenCount =
+                            group.markets.length -
+                            DEFAULT_PROPS_PER_PLAYER;
+
+                          return (
                             <div
+                              key={group.name}
                               style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent:
-                                  'space-between',
-                                padding:
-                                  '14px 16px',
-                                background:
-                                  '#20262a',
-                                border:
-                                  '1px solid #343a40',
-                                borderRadius:
-                                  '8px 8px 0 0',
+                                marginBottom: 24,
                               }}
                             >
                               <div
                                 style={{
-                                  fontWeight: 700,
-                                  fontSize: 15,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent:
+                                    'space-between',
+                                  gap: 12,
+                                  flexWrap: 'wrap',
+                                  padding:
+                                    '14px 16px',
+                                  background:
+                                    '#20262a',
+                                  border:
+                                    '1px solid #343a40',
+                                  borderRadius:
+                                    '8px 8px 0 0',
                                 }}
                               >
-                                {group.name}
+                                <div>
+                                  <div
+                                    style={{
+                                      fontWeight: 700,
+                                      fontSize: 15,
+                                    }}
+                                  >
+                                    {group.name}
+                                  </div>
+
+                                  <div
+                                    className="muted"
+                                    style={{
+                                      marginTop: 4,
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    {group.markets.length}{' '}
+                                    total props
+                                  </div>
+                                </div>
+
+                                {hiddenCount > 0 && (
+                                  <button
+                                    className="refresh"
+                                    onClick={() =>
+                                      togglePlayer(
+                                        group.name
+                                      )
+                                    }
+                                    style={{
+                                      display: 'flex',
+                                      alignItems:
+                                        'center',
+                                      gap: 6,
+                                    }}
+                                  >
+                                    {expanded ? (
+                                      <>
+                                        <ChevronUp
+                                          size={15}
+                                        />
+                                        Show Less
+                                      </>
+                                    ) : (
+                                      <>
+                                        <ChevronDown
+                                          size={15}
+                                        />
+                                        Show{' '}
+                                        {hiddenCount}{' '}
+                                        More
+                                      </>
+                                    )}
+                                  </button>
+                                )}
                               </div>
 
-                              <div className="muted">
-                                {
-                                  group.markets
-                                    .length
-                                }{' '}
-                                props
-                              </div>
-                            </div>
+                              <div className="tablewrap">
+                                <table>
+                                  <thead>
+                                    <tr>
+                                      <th>
+                                        PLAYER PROP /
+                                        LINE
+                                      </th>
+                                      <th>
+                                        {oddsFormat ===
+                                        'american'
+                                          ? 'AMERICAN ODDS'
+                                          : 'IMPLIED PROBABILITY'}
+                                      </th>
+                                      <th>VOLUME</th>
+                                      <th>WATCH</th>
+                                    </tr>
+                                  </thead>
 
-                            <div className="tablewrap">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    <th>
-                                      PLAYER PROP /
-                                      LINE
-                                    </th>
-                                    <th>
-                                      {oddsFormat ===
-                                      'american'
-                                        ? 'AMERICAN ODDS'
-                                        : 'IMPLIED PROBABILITY'}
-                                    </th>
-                                    <th>
-                                      VOLUME
-                                    </th>
-                                    <th>
-                                      WATCH
-                                    </th>
-                                  </tr>
-                                </thead>
-
-                                <tbody>
-                                  {group.markets.map(
-                                    (
-                                      market,
-                                      index
-                                    ) =>
-                                      renderMarketRow(
+                                  <tbody>
+                                    {visibleMarkets.map(
+                                      (
                                         market,
                                         index
-                                      )
-                                  )}
-                                </tbody>
-                              </table>
+                                      ) =>
+                                        renderMarketRow(
+                                          market,
+                                          index
+                                        )
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
-                          </div>
-                        )
+                          );
+                        }
                       )}
 
                       {!selectedMarkets.length && (
@@ -1757,10 +1929,7 @@ export default function Home() {
 
                         <tbody>
                           {selectedMarkets.map(
-                            (
-                              market,
-                              index
-                            ) =>
+                            (market, index) =>
                               renderMarketRow(
                                 market,
                                 index
@@ -1777,8 +1946,7 @@ export default function Home() {
                             category
                           </h3>
                           <p>
-                            Try another market
-                            type.
+                            Try another market type.
                           </p>
                         </div>
                       )}
