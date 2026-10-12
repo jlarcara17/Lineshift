@@ -80,15 +80,7 @@ const historyKey = 'lineshift-history-v1';
 const picksKey = 'lineshift-weekly-picks-v1';
 const watchKey = 'lineshift-watch';
 
-const leagues = [
-  'NFL',
-  'NBA',
-  'MLB',
-  'NHL',
-  'NCAAF',
-  'NCAAB',
-  'EPL',
-];
+const leagues = ['NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAAB', 'EPL'];
 
 const categories: Category[] = [
   'Moneyline',
@@ -100,7 +92,6 @@ const categories: Category[] = [
 
 function numericProbability(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === '') return null;
-
   const value = Number(raw);
 
   return Number.isFinite(value) && value >= 0 && value <= 1
@@ -110,7 +101,6 @@ function numericProbability(raw: unknown): number | null {
 
 function price(raw: unknown): string {
   const value = numericProbability(raw);
-
   return value === null ? '—' : `${(value * 100).toFixed(1)}%`;
 }
 
@@ -138,7 +128,6 @@ function kickoffTimestamp(value: string | null | undefined): number {
   if (!value) return Infinity;
 
   const timestamp = Date.parse(value);
-
   return Number.isFinite(timestamp) ? timestamp : Infinity;
 }
 
@@ -155,6 +144,35 @@ function formatKickoff(value: string | null | undefined): string {
     minute: '2-digit',
     timeZoneName: 'short',
   }).format(new Date(value));
+}
+
+// Remove Polymarket's event-specific suffixes so that
+// all markets for the same game appear under one matchup.
+function normalizeMatchupName(rawName: string): string {
+  const name = rawName.trim();
+
+  const suffixes = [
+    ' - First Touchdown Scorer',
+    ' - Anytime Touchdown Scorer',
+    ' - Highest Scoring Quarter',
+    ' - Player Props',
+    ' - Team Props',
+    ' - Game Props',
+    ' - Passing Props',
+    ' - Rushing Props',
+    ' - Receiving Props',
+    ' - Touchdown Props',
+    ' - Alternate Spreads',
+    ' - Alternate Totals',
+  ];
+
+  for (const suffix of suffixes) {
+    if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
+      return name.slice(0, -suffix.length).trim();
+    }
+  }
+
+  return name;
 }
 
 function marketCategory(market: Market): Category {
@@ -204,42 +222,35 @@ function groupGames(markets: Market[]): Game[] {
   const groups = new Map<string, Game>();
 
   for (const market of markets) {
-    const name = gameName(market);
+    const name = normalizeMatchupName(gameName(market));
+    const kickoff = market.gameStartTime || null;
 
-    const id = market.eventId
-      ? `event:${market.eventId}`
-      : market.eventSlug
-        ? `slug:${market.eventSlug}`
-        : `name:${name.toLowerCase().trim()}`;
+    // Matchup name + kickoff identifies the actual game.
+    // Polymarket can assign multiple event IDs to one game.
+    const kickoffKey = Number.isFinite(kickoffTimestamp(kickoff))
+      ? new Date(kickoff as string).toISOString()
+      : 'unknown';
 
+    const id = `${name.toLowerCase()}:${kickoffKey}`;
     const existing = groups.get(id);
 
     if (existing) {
       existing.markets.push(market);
-
-      if (
-        kickoffTimestamp(market.gameStartTime) <
-        kickoffTimestamp(existing.kickoff)
-      ) {
-        existing.kickoff = market.gameStartTime || null;
-      }
     } else {
       groups.set(id, {
         id,
         name,
-        kickoff: market.gameStartTime || null,
+        kickoff,
         markets: [market],
       });
     }
   }
 
   return Array.from(groups.values()).sort((a, b) => {
-    const difference =
-      kickoffTimestamp(a.kickoff) - kickoffTimestamp(b.kickoff);
+    const aTime = kickoffTimestamp(a.kickoff);
+    const bTime = kickoffTimestamp(b.kickoff);
 
-    if (Number.isNaN(difference)) return 0;
-    if (difference !== 0) return difference;
-
+    if (aTime !== bTime) return aTime - bTime;
     return a.name.localeCompare(b.name);
   });
 }
@@ -253,7 +264,6 @@ function buildSignals(
 
   for (const market of markets) {
     const mid = marketId(market);
-
     if (!mid) continue;
 
     for (const [index, outcome] of (market.outcomes || []).entries()) {
@@ -281,7 +291,7 @@ function buildSignals(
 
       signals.push({
         id,
-        label: `${gameName(market)} · ${marketName(market)}`,
+        label: `${normalizeMatchupName(gameName(market))} · ${marketName(market)}`,
         outcome: outcome.name || outcome.label || `Outcome ${index + 1}`,
         league,
         opening,
@@ -354,14 +364,12 @@ export default function Home() {
 
         for (const market of incoming) {
           const mid = marketId(market);
-
           if (!mid) continue;
 
           for (const [index, outcome] of (
             market.outcomes || []
           ).entries()) {
             const probability = numericProbability(outcome.price);
-
             if (probability === null) continue;
 
             const id = `${league}:${mid}:${outcome.outcomeId || index}`;
@@ -383,7 +391,7 @@ export default function Home() {
         try {
           localStorage.setItem(historyKey, JSON.stringify(next));
         } catch {
-          // Storage may be unavailable or full.
+          // Ignore local storage errors.
         }
 
         return next;
@@ -402,9 +410,7 @@ export default function Home() {
 
   useEffect(() => {
     load();
-
     const interval = setInterval(load, 60000);
-
     return () => clearInterval(interval);
   }, [load]);
 
@@ -1033,8 +1039,7 @@ export default function Home() {
                   <div className="market-tabs">
                     {categories.map((item) => {
                       const count = selectedGame.markets.filter(
-                        (market) =>
-                          marketCategory(market) === item
+                        (market) => marketCategory(market) === item
                       ).length;
 
                       return (
@@ -1067,8 +1072,7 @@ export default function Home() {
 
                       <tbody>
                         {selectedMarkets.map((market, index) => {
-                          const id =
-                            marketId(market) || String(index);
+                          const id = marketId(market) || String(index);
 
                           return (
                             <tr key={id}>
