@@ -76,9 +76,12 @@ type Category =
   | 'Player Props'
   | 'Other';
 
+type OddsFormat = 'probability' | 'american';
+
 const historyKey = 'lineshift-history-v1';
 const picksKey = 'lineshift-weekly-picks-v1';
 const watchKey = 'lineshift-watch';
+const oddsKey = 'lineshift-odds-format-v1';
 
 const leagues = ['NFL', 'NBA', 'MLB', 'NHL', 'NCAAF', 'NCAAB', 'EPL'];
 
@@ -92,6 +95,7 @@ const categories: Category[] = [
 
 function numericProbability(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === '') return null;
+
   const value = Number(raw);
 
   return Number.isFinite(value) && value >= 0 && value <= 1
@@ -101,7 +105,29 @@ function numericProbability(raw: unknown): number | null {
 
 function price(raw: unknown): string {
   const value = numericProbability(raw);
+
   return value === null ? '—' : `${(value * 100).toFixed(1)}%`;
+}
+
+function americanOdds(raw: unknown): string {
+  const probability = numericProbability(raw);
+
+  if (probability === null || probability === 0 || probability === 1) {
+    return '—';
+  }
+
+  const odds =
+    probability >= 0.5
+      ? (-100 * probability) / (1 - probability)
+      : (100 * (1 - probability)) / probability;
+
+  const rounded = Math.round(odds);
+
+  return rounded > 0 ? `+${rounded}` : String(rounded);
+}
+
+function formatPrice(raw: unknown, format: OddsFormat): string {
+  return format === 'american' ? americanOdds(raw) : price(raw);
 }
 
 function money(raw: unknown): string {
@@ -128,6 +154,7 @@ function kickoffTimestamp(value: string | null | undefined): number {
   if (!value) return Infinity;
 
   const timestamp = Date.parse(value);
+
   return Number.isFinite(timestamp) ? timestamp : Infinity;
 }
 
@@ -146,8 +173,6 @@ function formatKickoff(value: string | null | undefined): string {
   }).format(new Date(value));
 }
 
-// Remove Polymarket's event-specific suffixes so that
-// all markets for the same game appear under one matchup.
 function normalizeMatchupName(rawName: string): string {
   const name = rawName.trim();
 
@@ -225,8 +250,6 @@ function groupGames(markets: Market[]): Game[] {
     const name = normalizeMatchupName(gameName(market));
     const kickoff = market.gameStartTime || null;
 
-    // Matchup name + kickoff identifies the actual game.
-    // Polymarket can assign multiple event IDs to one game.
     const kickoffKey = Number.isFinite(kickoffTimestamp(kickoff))
       ? new Date(kickoff as string).toISOString()
       : 'unknown';
@@ -251,6 +274,7 @@ function groupGames(markets: Market[]): Game[] {
     const bTime = kickoffTimestamp(b.kickoff);
 
     if (aTime !== bTime) return aTime - bTime;
+
     return a.name.localeCompare(b.name);
   });
 }
@@ -264,6 +288,7 @@ function buildSignals(
 
   for (const market of markets) {
     const mid = marketId(market);
+
     if (!mid) continue;
 
     for (const [index, outcome] of (market.outcomes || []).entries()) {
@@ -325,16 +350,33 @@ export default function Home() {
   const [category, setCategory] = useState<Category>('Moneyline');
   const [watch, setWatch] = useState<string[]>([]);
   const [onlyWatch, setOnlyWatch] = useState(false);
+  const [oddsFormat, setOddsFormat] = useState<OddsFormat>('probability');
 
   useEffect(() => {
     try {
       setWatch(JSON.parse(localStorage.getItem(watchKey) || '[]'));
       setHistory(JSON.parse(localStorage.getItem(historyKey) || '{}'));
       setPicks(JSON.parse(localStorage.getItem(picksKey) || '[]'));
+
+      const savedFormat = localStorage.getItem(oddsKey);
+
+      if (savedFormat === 'american' || savedFormat === 'probability') {
+        setOddsFormat(savedFormat);
+      }
     } catch {
       // Continue with empty local data.
     }
   }, []);
+
+  function changeOddsFormat(nextFormat: OddsFormat) {
+    setOddsFormat(nextFormat);
+
+    try {
+      localStorage.setItem(oddsKey, nextFormat);
+    } catch {
+      // Ignore local storage errors.
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -364,12 +406,14 @@ export default function Home() {
 
         for (const market of incoming) {
           const mid = marketId(market);
+
           if (!mid) continue;
 
           for (const [index, outcome] of (
             market.outcomes || []
           ).entries()) {
             const probability = numericProbability(outcome.price);
+
             if (probability === null) continue;
 
             const id = `${league}:${mid}:${outcome.outcomeId || index}`;
@@ -410,7 +454,9 @@ export default function Home() {
 
   useEffect(() => {
     load();
+
     const interval = setInterval(load, 60000);
+
     return () => clearInterval(interval);
   }, [load]);
 
@@ -824,7 +870,8 @@ export default function Home() {
 
                     <div className="signalnumbers">
                       <span>
-                        {(signal.current * 100).toFixed(1)}% implied
+                        {formatPrice(signal.current, oddsFormat)}{' '}
+                        {oddsFormat === 'probability' ? 'implied' : 'equivalent'}
                       </span>
 
                       <strong className="positive">
@@ -1036,6 +1083,74 @@ export default function Home() {
                     </div>
                   </div>
 
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 12,
+                      marginBottom: 20,
+                    }}
+                  >
+                    <div className="eyebrow">DISPLAY PRICES AS</div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 6,
+                        padding: 4,
+                        borderRadius: 8,
+                        border: '1px solid #343a40',
+                        background: '#191d21',
+                      }}
+                    >
+                      <button
+                        onClick={() => changeOddsFormat('probability')}
+                        aria-pressed={oddsFormat === 'probability'}
+                        style={{
+                          padding: '9px 14px',
+                          borderRadius: 6,
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          background:
+                            oddsFormat === 'probability'
+                              ? '#b6f36c'
+                              : 'transparent',
+                          color:
+                            oddsFormat === 'probability'
+                              ? '#151a13'
+                              : '#c7cbd0',
+                        }}
+                      >
+                        Probability %
+                      </button>
+
+                      <button
+                        onClick={() => changeOddsFormat('american')}
+                        aria-pressed={oddsFormat === 'american'}
+                        style={{
+                          padding: '9px 14px',
+                          borderRadius: 6,
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          background:
+                            oddsFormat === 'american'
+                              ? '#b6f36c'
+                              : 'transparent',
+                          color:
+                            oddsFormat === 'american'
+                              ? '#151a13'
+                              : '#c7cbd0',
+                        }}
+                      >
+                        American Odds
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="market-tabs">
                     {categories.map((item) => {
                       const count = selectedGame.markets.filter(
@@ -1064,7 +1179,12 @@ export default function Home() {
                       <thead>
                         <tr>
                           <th>MARKET / BETTING LINE</th>
-                          <th>OUTCOMES & IMPLIED PROBABILITY</th>
+                          <th>
+                            OUTCOMES &{' '}
+                            {oddsFormat === 'american'
+                              ? 'AMERICAN ODDS'
+                              : 'IMPLIED PROBABILITY'}
+                          </th>
                           <th>VOLUME</th>
                           <th>WATCH</th>
                         </tr>
@@ -1102,7 +1222,10 @@ export default function Home() {
                                           `Outcome ${outcomeIndex + 1}`}
 
                                         <strong>
-                                          {price(outcome.price)}
+                                          {formatPrice(
+                                            outcome.price,
+                                            oddsFormat
+                                          )}
                                         </strong>
                                       </span>
                                     )
@@ -1146,12 +1269,11 @@ export default function Home() {
               )}
 
               <div className="panelbottom">
+                <span>Source: Polymarket Gamma API · Read-only</span>
                 <span>
-                  Source: Polymarket Gamma API · Read-only
-                </span>
-                <span>
-                  Displayed prices are indicative, not guaranteed
-                  executable quotes
+                  {oddsFormat === 'american'
+                    ? 'American odds are calculated equivalents, not executable quotes'
+                    : 'Displayed probabilities are indicative, not guaranteed executable quotes'}
                 </span>
               </div>
             </section>
@@ -1160,9 +1282,11 @@ export default function Home() {
           <div className="disclaimer">
             LineShift is an independent demo dashboard and is not
             affiliated with Polymarket. Market-implied probabilities
-            are not guaranteed outcomes. Displayed prices may differ
-            from executable order-book quotes. This application does
-            not place trades or provide financial advice.
+            are not guaranteed outcomes. American odds are mathematical
+            conversions of displayed probabilities, not sportsbook
+            quotes. Displayed prices may differ from executable
+            order-book quotes. This application does not place trades
+            or provide financial advice.
           </div>
         </div>
       </main>
