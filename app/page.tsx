@@ -40,34 +40,67 @@ function teamFromText(raw: string): string | null { const text = raw.toLowerCase
 function matchupTeams(raw: string): string[] { const found = new Set<string>(); for (const [code, aliases] of Object.entries(teamAliases)) if (aliases.some(a => new RegExp(`(^|\\s)${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`).test(raw.toLowerCase().replace(/[^a-z0-9 ]/g, ' ')))) found.add(code); return [...found]; }
 function kalshiDate(eventId: string): string | null { const m = eventId.match(/^KXNFLGAME-(\d{2})([A-Z]{3})(\d{1,2})/); if (!m) return null; const months: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 }; const month = months[m[2]]; if (month === undefined) return null; return `${2000 + Number(m[1])}-${String(month + 1).padStart(2, '0')}-${m[3].padStart(2, '0')}`; }
 function gameLocalDate(value: string): string { const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value)); const get = (type: string) => parts.find(p => p.type === type)?.value || ''; return `${get('year')}-${get('month')}-${get('day')}`; }
-function buildComparisons(games: Game[], kalshi: KalshiMarket[]): Comparison[] {
-  const events = new Map<string, KalshiMarket[]>(); for (const k of kalshi) { const list = events.get(k.eventId) || []; list.push(k); events.set(k.eventId, list); }
-  const rows: Comparison[] = [];
-  for (const game of games) {
-    if (!game.kickoff || !Number.isFinite(Date.parse(game.kickoff))) continue;
-    const teams = matchupTeams(game.name); if (teams.length !== 2) continue;
-    const localDate = gameLocalDate(game.kickoff);
-    const possibleEvents = [...events.entries()].filter(([id, entries]) => {
-      const date = kalshiDate(id); if (!date) return false;
-      const days = Math.abs((Date.parse(date + 'T12:00:00Z') - Date.parse(localDate + 'T12:00:00Z')) / 86400000);
-      if (days > 1) return false; // Exchanges can use neighboring dates around midnight.
-      const eventTeams = entries.map(e => e.ticker.split('-').pop() || '');
-      return teams.every(t => eventTeams.includes(t)) && eventTeams.every(t => teams.includes(t));
-    });
-    if (possibleEvents.length !== 1) continue;
-    const [, entries] = possibleEvents[0];
-    const ml = game.markets.filter(m => categoryOf(m) === 'Moneyline');
-    for (const code of teams) {
-      const matchingOutcomes = ml.flatMap(m => m.outcomes || []).filter(o => teamFromText(o.name || o.label || '') === code && probability(o.price) !== null);
-      // Multiple distinct prices or ambiguous market types should not be compared.
-      if (matchingOutcomes.length !== 1) continue;
-      const k = entries.find(e => e.ticker.endsWith('-' + code));
-      const ask = probability(k?.yesAsk); const poly = probability(matchingOutcomes[0].price);
-      if (!k || ask === null || poly === null) continue;
-      rows.push({ id: `${game.id}:${code}`, game, team: teamNames[code], polymarket: poly, kalshiAsk: ask, kalshiBid: probability(k.yesBid), difference: (poly - ask) * 100 });
-    }
+// Use the exchange's scheduled event date, not its contract settlement/close date.
+function kalshiEventKey(eventId: string): string | null {
+  const match = eventId.match(/^KXNFLGAME-(\d{2}[A-Z]{3}\d{1,2})([A-Z]+)$/);
+  if (!match) return null;
+  const date = kalshiDate(eventId);
+  const suffix = match[2];
+  const codes = Object.keys(teamNames).filter(code => code !== 'JAX').sort((a, b) => b.length - a.length);
+  const pairs = codes.flatMap(a => codes.filter(b => b !== a && a + b === suffix).map(b => [a, b]));
+  if (!date || pairs.length !== 1) return null;
+  return `${date}:${pairs[0].sort().join(':')}`;
+}
+function polymarketEventKey(game: Game): string | null {
+  if (!game.kickoff || !Number.isFinite(Date.parse(game.kickoff))) return null;
+  let teams = matchupTeams(game.name);
+  if (teams.length !== 2) {
+    const slug = game.markets.find(m => m.eventSlug)?.eventSlug || '';
+    const match = slug.match(/^nfl-([a-z]+)-([a-z]+)-\d{4}-\d{2}-\d{2}/i);
+    const aliases: Record<string, string> = { la: 'LAR', lar: 'LAR', lac: 'LAC', buf: 'BUF', sf: 'SF', gb: 'GB', kc: 'KC', lv: 'LV', ne: 'NE', no: 'NO', nyg: 'NYG', nyj: 'NYJ', tb: 'TB', jax: 'JAC', jac: 'JAC', was: 'WAS' };
+    if (match) teams = [match[1], match[2]].map(code => aliases[code.toLowerCase()] || code.toUpperCase());
   }
-  return rows;
+  if (teams.length !== 2 || teams[0] === teams[1]) return null;
+  return `${gameLocalDate(game.kickoff)}:${teams.sort().join(':')}`;
+}
+function buildComparisons(games: Game[], kalshi: KalshiMarket[]): Comparison[] {
+  const events = new Map<string, KalshiMarket[]>();
+  for (const contract of kalshi) {
+    const key = kalshiEventKey(contract.eventId);
+    if (!key) continue;
+    const list = events.get(key) || [];
+    list.push(contract);
+    events.set(key, list);
+  }
+  const rows: Comparison[] = [];
+  const used = new Set<string>();
+  for (const game of games) {
+    const key = polymarketEventKey(game);
+    const entries = key ? events.get(key) : undefined;
+    if (!key || !entries || used.has(key)) continue;
+    const moneylines = game.markets.filter(m => categoryOf(m) === 'Moneyline');
+    // Only the canonical two-outcome game winner market is comparable.
+    const canonical = moneylines.filter(m => {
+      const outcomes = m.outcomes || [];
+      const codes = outcomes.map(o => teamFromText(o.name || o.label || ''));
+      return outcomes.length === 2 && codes.every(Boolean) && new Set(codes).size === 2 &&
+        codes.every(code => key.endsWith(':' + [...codes].sort().join(':')));
+    });
+    const unique = [...new Map(canonical.map(m => [marketId(m), m])).values()];
+    if (unique.length !== 1) continue;
+    const market = unique[0];
+    for (const outcome of market.outcomes || []) {
+      const code = teamFromText(outcome.name || outcome.label || '');
+      if (!code) continue;
+      const contract = entries.find(e => e.ticker.endsWith('-' + code));
+      const ask = probability(contract?.yesAsk);
+      const poly = probability(outcome.price);
+      if (!contract || ask === null || poly === null) continue;
+      rows.push({ id: `${key}:${code}`, game, team: teamNames[code], polymarket: poly, kalshiAsk: ask, kalshiBid: probability(contract.yesBid), difference: (poly - ask) * 100 });
+    }
+    if (rows.some(r => r.id.startsWith(key + ':'))) used.add(key);
+  }
+  return rows.sort((a, b) => kickoffTimestamp(a.game.kickoff) - kickoffTimestamp(b.game.kickoff) || a.team.localeCompare(b.team));
 }
 function playerName(m: Market) { const title = marketName(m); const colon = title.indexOf(':'); if (colon > 0) return title.slice(0, colon).trim(); const match = title.match(/\s+(?:Passing Yards|Rushing Yards|Receiving Yards|Receptions|Anytime Touchdown|First Touchdown|Anytime TD|First TD|to score a touchdown)\b/i); return match?.index ? title.slice(0, match.index).trim() : m.groupItemTitle || 'Other Player Props'; }
 function propType(m: Market) { const s = marketName(m).toLowerCase(); if (/anytime.*(?:td|touchdown)/.test(s)) return 'Anytime TD'; for (const name of ['Passing Yards', 'Rushing Yards', 'Receiving Yards', 'Receptions', 'First Touchdown']) if (s.includes(name.toLowerCase())) return name; return 'Other'; }
@@ -154,6 +187,7 @@ export default function Home() {
       {view === 'compare' && <section className="panel"><div className="panelhead"><div><div className="eyebrow">CROSS-EXCHANGE NFL MONEYLINES</div><h2>Market Comparison <span className="count">{comparisons.length}</span></h2></div><div className="last">{updated ? `Last updated ${new Date(updated).toLocaleTimeString()}` : 'Waiting for feed'}</div></div>
         <p className="signalintro">Compare Polymarket indicative prices with Kalshi YES ask prices. Lower displayed prices are highlighted, but this is <strong>not an arbitrage scanner</strong>. The feeds may have different liquidity, fees, and settlement terms. A difference does not guarantee a tradeable opportunity.</p>
         
+        <p className="signalintro">Kalshi NFL games: {new Set(kalshi.map(k => k.eventId)).size} · Matched games: {new Set(comparisons.map(c => c.game.id)).size} · Kalshi games without a comparable Polymarket moneyline: {Math.max(0, new Set(kalshi.map(k => k.eventId)).size - new Set(comparisons.map(c => polymarketEventKey(c.game))).size)}.</p>
         {kalshiError && <div className="error"><CircleHelp size={18} /><div><strong>Kalshi feed unavailable</strong><div>{kalshiError}</div></div></div>}
         {error && <div className="error"><CircleHelp size={18} /><div><strong>Polymarket feed unavailable</strong><div>{error}</div></div></div>}
         <div className="tablewrap"><table><thead><tr><th>GAME / TEAM</th><th>POLYMARKET<br />INDICATIVE</th><th>KALSHI<br />YES ASK</th><th>PRICE DIFFERENCE</th><th>LOWER DISPLAYED PRICE</th></tr></thead><tbody>{comparisons.map(row => <tr key={row.id}><td><div className="marketname">{row.team}</div><div className="marketid">{row.game.name} · {formatKickoff(row.game.kickoff)}</div></td><td><strong style={{ color: row.polymarket < row.kalshiAsk ? '#b6f36c' : undefined }}>{formatPrice(row.polymarket, oddsFormat)}</strong></td><td><strong style={{ color: row.kalshiAsk < row.polymarket ? '#b6f36c' : undefined }}>{formatPrice(row.kalshiAsk, oddsFormat)}</strong></td><td>{Math.abs(row.difference).toFixed(1)} pp</td><td><span className="badge">{Math.abs(row.difference) < 0.05 ? 'Tie' : row.difference > 0 ? 'Kalshi' : 'Polymarket'}</span></td></tr>)}</tbody></table>{!comparisons.length && <div className="empty"><BarChart3 size={30} /><h3>No verified matches yet</h3><p>Both feeds may be working even when no identical NFL moneyline contracts can be matched. We only show unambiguous game, date, and team matches.</p><p>Kalshi markets loaded: {kalshi.length} · Polymarket markets loaded: {markets.length}</p></div>}</div>
