@@ -8,7 +8,7 @@ type History = Record<string, Tick[]>;
 type Outcome = { outcomeId?: string; name?: string; label?: string; price?: string | number | null };
 type Market = { marketId?: string; id?: string; eventId?: string; eventName?: string; eventSlug?: string; startDate?: string | null; gameStartTime?: string | null; name?: string; title?: string; marketType?: string; sportsMarketType?: string | null; line?: number | string | null; groupItemTitle?: string | null; source?: string; outcomes?: Outcome[]; volume?: string | number; status?: string };
 type KalshiMarket = { marketId: string; eventId: string; ticker: string; name: string; yesSubtitle?: string | null; yesBid: number | null; yesAsk: number | null; closeTime?: string | null };
-type Signal = { id: string; label: string; outcome: string; league: string; opening: number; current: number; change: number; observations: number; score: number };
+type Signal = { id: string; label: string; outcome: string; league: string; opening: number; current: number; change: number; observations: number; score: number; ticks: Tick[] };
 type Game = { id: string; name: string; kickoff: string | null; markets: Market[] };
 type Category = 'Moneyline' | 'Spreads' | 'Totals' | 'Player Props' | 'Other';
 type OddsFormat = 'probability' | 'american';
@@ -16,7 +16,7 @@ type GamePeriod = 'Full Game' | 'Q1' | 'Q2' | 'First Half' | 'Q3' | 'Q4' | 'Seco
 const gamePeriods: GamePeriod[] = ['Full Game', 'Q1', 'Q2', 'First Half', 'Q3', 'Q4', 'Second Half'];
 type Comparison = { id: string; game: Game; team: string; polymarket: number; kalshiAsk: number; kalshiBid: number | null; difference: number };
 
-const historyKey = 'lineshift-history-v1';
+const historyKey = 'lineshift-history-v2'; // Reset earlier unverified observations.
 const watchKey = 'lineshift-watch';
 const oddsKey = 'lineshift-odds-format-v1';
 const categories: Category[] = ['Moneyline', 'Spreads', 'Totals', 'Player Props', 'Other'];
@@ -136,7 +136,34 @@ function analyzeMatches(games: Game[], kalshi: KalshiMarket[]): { rows: Comparis
 }
 function playerName(m: Market) { const title = marketName(m); const colon = title.indexOf(':'); if (colon > 0) return title.slice(0, colon).trim(); const match = title.match(/\s+(?:Passing Yards|Rushing Yards|Receiving Yards|Receptions|Anytime Touchdown|First Touchdown|Anytime TD|First TD|to score a touchdown)\b/i); return match?.index ? title.slice(0, match.index).trim() : m.groupItemTitle || 'Other Player Props'; }
 function propType(m: Market) { const s = marketName(m).toLowerCase(); if (/anytime.*(?:td|touchdown)/.test(s)) return 'Anytime TD'; for (const name of ['Passing Yards', 'Rushing Yards', 'Receiving Yards', 'Receptions', 'First Touchdown']) if (s.includes(name.toLowerCase())) return name; return 'Other'; }
-function buildSignals(markets: Market[], history: History, league: string): Signal[] { const result: Signal[] = []; for (const m of markets) (m.outcomes || []).forEach((o, i) => { const id = `${league}:${marketId(m)}:${o.outcomeId || i}`; const ticks = history[id] || []; if (ticks.length < 2 || ticks[ticks.length - 1].at - ticks[0].at < 60000) return; const opening = ticks[0].prob; const current = ticks[ticks.length - 1].prob; const change = (current - opening) * 100; if (Math.abs(change) < 0.5 || current < 1 / 3 || current > 0.85) return; result.push({ id, label: `${normalizeMatchupName(gameName(m))} · ${marketName(m)}`, outcome: o.name || o.label || `Outcome ${i + 1}`, league, opening, current, change, observations: ticks.length, score: Math.abs(change) }); }); return result.sort((a, b) => b.score - a.score); }
+function buildSignals(markets: Market[], history: History, league: string): Signal[] {
+  const result: Signal[] = [];
+  for (const m of markets) for (const [i, o] of (m.outcomes || []).entries()) {
+    const id = `${league}:${marketId(m)}:${o.outcomeId || i}`;
+    const ticks = (history[id] || []).filter(t => Number.isFinite(t.prob) && t.prob > 0.01 && t.prob < 0.99);
+    if (ticks.length < 2 || ticks[ticks.length - 1].at - ticks[0].at < 60000) continue;
+    // Ignore suspect discontinuities instead of presenting them as genuine market moves.
+    if (ticks.some((t, j) => j > 0 && Math.abs(t.prob - ticks[j - 1].prob) > 0.15)) continue;
+    const opening = ticks[0].prob;
+    const current = ticks[ticks.length - 1].prob;
+    const change = (current - opening) * 100;
+    if (Math.abs(change) < 0.5) continue;
+    result.push({ id, label: `${normalizeMatchupName(gameName(m))} · ${marketName(m)}`, outcome: o.name || o.label || `Outcome ${i + 1}`, league, opening, current, change, observations: ticks.length, score: Math.abs(change), ticks });
+  }
+  return result.sort((a, b) => b.score - a.score).slice(0, 30);
+}
+function OddsSparkline({ ticks, rising }: { ticks: Tick[]; rising: boolean }) {
+  const width = 300, height = 78, pad = 8;
+  const values = ticks.map(t => t.prob);
+  const lo = Math.max(0, Math.min(...values) - 0.025), hi = Math.min(1, Math.max(...values) + 0.025);
+  const first = ticks[0].at, span = Math.max(1, ticks[ticks.length - 1].at - first);
+  const points = ticks.map(t => `${pad + ((t.at - first) / span) * (width - 2 * pad)},${height - pad - ((t.prob - lo) / Math.max(0.001, hi - lo)) * (height - 2 * pad)}`).join(' ');
+  return <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Observed implied probability over time" style={{ width: '100%', height: 78, display: 'block' }}>
+    <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="#344554" strokeWidth="1" />
+    <polyline points={points} fill="none" stroke={rising ? '#b6f36c' : '#ff9999'} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>;
+}
+
 
 export default function Home() {
   const [history, setHistory] = useState<History>({});
@@ -148,6 +175,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [kalshiError, setKalshiError] = useState('');
+  const [novigStatus, setNovigStatus] = useState('Checking access…');
   const [updated, setUpdated] = useState('');
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [category, setCategory] = useState<Category>('Moneyline');
@@ -172,9 +200,10 @@ export default function Home() {
       const data = await p.value.json(); if (!p.value.ok) throw new Error(data.error || 'Unable to load markets');
       const incoming: Market[] = Array.isArray(data.markets) ? data.markets : [];
       setMarkets(incoming); setUpdated(data.updatedAt || new Date().toISOString()); setError('');
+      void fetch('/api/novig', { cache: 'no-store' }).then(r => r.json()).then(d => setNovigStatus(d.message || d.status || 'Unavailable')).catch(() => setNovigStatus('Unavailable'));
       setHistory(previous => {
         const next: History = { ...previous }; const now = Date.now();
-        for (const m of incoming) (m.outcomes || []).forEach((o, i) => { const p = probability(o.price); if (p === null) return; const id = `${league}:${marketId(m)}:${o.outcomeId || i}`; const old = next[id] || []; if (!old.length || old[old.length - 1].prob !== p || now - old[old.length - 1].at >= 60000) next[id] = [...old, { at: now, prob: p }].slice(-500); });
+        for (const m of incoming) (m.outcomes || []).forEach((o, i) => { const p = probability(o.price); if (p === null || p <= 0.01 || p >= 0.99) return; const id = `${league}:${marketId(m)}:${o.outcomeId || i}`; const old = (next[id] || []).filter(t => now - t.at <= 24 * 60 * 60 * 1000); if (old.length && Math.abs(old[old.length - 1].prob - p) > 0.15) { next[id] = []; return; } if (!old.length || old[old.length - 1].prob !== p || now - old[old.length - 1].at >= 60000) next[id] = [...old, { at: now, prob: p }].slice(-500); });
         try { localStorage.setItem(historyKey, JSON.stringify(next)); } catch {} return next;
       });
       if (league === 'NFL') {
@@ -226,16 +255,17 @@ export default function Home() {
       <button className={'navitem ' + (view === 'markets' ? 'active' : '')} onClick={() => setView('markets')}><BarChart3 size={18} />Market Overview</button>
       <button className={'navitem ' + (view === 'compare' ? 'active' : '')} onClick={() => { setView('compare'); setSelectedGameId(null); }}><TrendingUp size={18} />Market Comparison<b>{comparisons.length}</b></button>
       <button className={'navitem ' + (view === 'signals' ? 'active' : '')} onClick={() => setView('signals')}><Activity size={18} />Line Movement<b>{signals.length}</b></button>
-      <button className={'navitem ' + (view === 'arb' ? 'active' : '')} onClick={() => setView('arb')}><TrendingUp size={18} />Arbitrage Scanner<b>0</b></button>
+      <button className={'navitem ' + (view === 'predictions' ? 'active' : '')} onClick={() => setView('predictions')}><TrendingUp size={18} />LineShift Predictions<b>NEW</b></button>
       <button className={'navitem ' + (onlyWatch ? 'active' : '')} onClick={() => { setOnlyWatch(!onlyWatch); setSelectedGameId(null); setView('markets'); }}><TrendingUp size={18} />Watchlist<b>{watch.length}</b></button>
       <div className="navlabel second">DATA SOURCES</div><div className="source"><span className={'dot ' + (error ? 'red' : '')} /><div>Polymarket Gamma API<small>{error ? 'Unavailable' : 'Read-only connection'}</small></div></div>
       <div className="source"><span className={'dot ' + (kalshiError ? 'red' : '')} /><div>Kalshi Markets API<small>{kalshiError ? 'Unavailable' : 'Read-only connection'}</small></div></div>
+      <div className="source"><span className="dot red" /><div>Novig API<small>{novigStatus}</small></div></div>
       <div className="sidebottom"><ShieldCheck size={18} /><span>Market data only<br /><small>No trades or account access</small></span></div>
     </aside>
-    <main className="main"><header className="top"><div className="crumb">WORKSPACE <span>/</span> {view === 'compare' ? 'MARKET COMPARISON' : selectedGame && view === 'markets' ? 'MATCHUP DETAILS' : view === 'signals' ? 'LINE MOVEMENT' : view === 'arb' ? 'ARBITRAGE SCANNER' : 'MARKET OVERVIEW'}</div><div className="topright"><span className="live"><span className={'dot ' + (error ? 'red' : '')} />{error ? 'OFFLINE' : 'LIVE DATA'}</span><a href="https://docs.polymarket.com/" target="_blank" rel="noreferrer">API Docs <ExternalLink size={13} /></a></div></header>
+    <main className="main"><header className="top"><div className="crumb">WORKSPACE <span>/</span> {view === 'compare' ? 'MARKET COMPARISON' : selectedGame && view === 'markets' ? 'MATCHUP DETAILS' : view === 'signals' ? 'LINE MOVEMENT' : view === 'predictions' ? 'LINE SHIFT PREDICTIONS' : 'MARKET OVERVIEW'}</div><div className="topright"><span className="live"><span className={'dot ' + (error ? 'red' : '')} />{error ? 'OFFLINE' : 'LIVE DATA'}</span><a href="https://docs.polymarket.com/" target="_blank" rel="noreferrer">API Docs <ExternalLink size={13} /></a></div></header>
       <div className="content"><div className="heading"><div><div className="eyebrow">TRACK THE LINES. SPOT THE SHIFTS.</div><h1>LineShift Overview<span className="headingdot">.</span></h1><p>Explore NFL prediction markets, compare exchange prices, and track the contracts that matter.</p></div><button className="refresh" onClick={() => void load()} disabled={loading}><RefreshCw size={16} className={loading ? 'spin' : ''} />Refresh Data</button></div>
       <section className="stats"><div className="stat"><div className="stathead">AVAILABLE MATCHUPS<BarChart3 size={18} /></div><div className="statvalue">{loading && !games.length ? '…' : games.length.toLocaleString()}</div><div className="statfoot">Upcoming {league} events</div></div><div className="stat"><div className="stathead">AVAILABLE CONTRACTS<TrendingUp size={18} /></div><div className="statvalue">{markets.length.toLocaleString()}</div><div className="statfoot">Polymarket feed</div></div><div className="stat"><div className="stathead">DATA CONNECTION{error ? <WifiOff size={18} /> : <Wifi size={18} />}</div><div className="statvalue smaller">{error ? 'Unavailable' : 'Connected'}</div><div className="statfoot">Refreshes every 60 seconds</div></div><div className="stat"><div className="stathead">TRADING MODE<ShieldCheck size={18} /></div><div className="statvalue smaller">Read Only</div><div className="statfoot">No orders are placed</div></div></section>
-      {(view === 'compare' || view === 'arb') && <div style={{ marginBottom: 18 }}><div className="eyebrow" style={{ marginBottom: 10 }}>MARKET PERIOD</div><div className="market-tabs" role="group" aria-label="Select game period">{gamePeriods.map(p => <button key={p} className={'market-tab ' + (period === p ? 'selected' : '')} aria-pressed={period === p} onClick={() => { setPeriod(p); setShowAlternateLines(false); }}>{p}</button>)}</div></div>}
+      {view === 'compare' && <div style={{ marginBottom: 18 }}><div className="eyebrow" style={{ marginBottom: 10 }}>MARKET PERIOD</div><div className="market-tabs" role="group" aria-label="Select game period">{gamePeriods.map(p => <button key={p} className={'market-tab ' + (period === p ? 'selected' : '')} aria-pressed={period === p} onClick={() => { setPeriod(p); setShowAlternateLines(false); }}>{p}</button>)}</div></div>}
       {view === 'compare' && period !== 'Full Game' && <section className="panel"><div className="panelhead"><h2>{period} Comparison</h2></div><div className="empty"><ShieldCheck size={30} /><h3>No verified {period.toLowerCase()} comparisons</h3><p>Period-specific contracts require independently verified market identities and matching settlement rules on both exchanges. We will not substitute full-game prices or label uncertain contracts as comparable.</p></div></section>}
       {view === 'compare' && period === 'Full Game' && <section className="panel"><div className="panelhead"><div><div className="eyebrow">CROSS-EXCHANGE NFL MONEYLINES · {period.toUpperCase()}</div><h2>Market Comparison <span className="count">{period === 'Full Game' ? comparisons.length : 0}</span></h2></div><div className="last">{updated ? `Last updated ${new Date(updated).toLocaleTimeString()}` : 'Waiting for feed'}</div></div>
         <p className="signalintro">Compare Polymarket indicative prices with Kalshi YES ask prices. Lower displayed prices are highlighted, but this is <strong>not an arbitrage scanner</strong>. The feeds may have different liquidity, fees, and settlement terms. A difference does not guarantee a tradeable opportunity.</p>
@@ -248,7 +278,7 @@ export default function Home() {
         <div className="panelbottom"><span>Kalshi YES ask vs. Polymarket indicative probability · Read only</span><span>American odds are calculated equivalents, not executable sportsbook quotes</span></div></section>}
       {view === 'signals' && <section className="panel signalpanel">
         <div className="panelhead"><div><div className="eyebrow">NFL PRICE TRACKER</div><h2>Price Changes <span className="count">{signals.length}</span></h2></div></div>
-        <p className="signalintro">See how NFL contract prices have changed <strong>since you opened this page</strong>. These are observed prices, not betting recommendations. Large changes may be caused by incomplete or unreliable feed data and should be verified before use.</p>
+        <p className="signalintro">See how NFL contract prices have changed <strong>since you opened this page</strong>. These are observed prices, not betting recommendations. Only movements with consistent observations are shown. Suspect jumps are hidden rather than presented as real odds shifts.</p>
         <div className="signalgrid">{signals.map(s => {
           const [matchup, ...details] = s.label.split(' · ');
           const rising = s.change > 0;
@@ -257,15 +287,36 @@ export default function Home() {
             <div className="eyebrow">{matchup || 'NFL game'}</div>
             <h3 style={{margin: 0, lineHeight: 1.35}}>{details.join(' · ') || s.label}</h3>
             <div className="muted" style={{fontSize: 13}}>Selection: <strong style={{color: '#f2f6fa'}}>{s.outcome}</strong></div>
+            <OddsSparkline ticks={s.ticks} rising={rising} />
             <div style={{borderTop: '1px solid #263644', paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap'}}>
               <div><div className="muted" style={{fontSize: 11, marginBottom: 5}}>FIRST SEEN → LATEST</div><strong style={{fontSize: 16}}>{formatPrice(s.opening, oddsFormat)} → {formatPrice(s.current, oddsFormat)}</strong></div>
               <div style={{textAlign: 'right'}}><div className="muted" style={{fontSize: 11, marginBottom: 5}}>IMPLIED CHANCE</div><strong className={rising ? 'positive' : 'negative'}>{rising ? '▲ Increased' : '▼ Decreased'} {Math.abs(s.change).toFixed(1)} points</strong></div>
             </div>
             <div className="muted" style={{fontSize: 12}}>{s.observations} price checks this session{suspicious ? ' · ⚠ Large change: verify feed accuracy' : ''}</div>
           </div>;
-        })}{!signals.length && <div className="signalempty">No confirmed price changes yet. Leave this page open for a few minutes while prices refresh.</div>}</div>
+        })}{!signals.length && <div className="signalempty">Collecting verified odds history. Keep this page open while the feed refreshes every 60 seconds. Large unverified jumps are excluded.</div>}</div>
       </section>}
-      {view === 'arb' && <section className="panel signalpanel"><div className="panelhead"><div><div className="eyebrow">EXECUTABLE CROSS-EXCHANGE OPPORTUNITIES</div><h2>Arbitrage Scanner · {period} <span className="count">0</span></h2></div></div><div className="empty"><ShieldCheck size={30} /><h3>No qualifying arbitrage opportunities detected</h3><p>LineShift does not yet have verified executable asks, order-book depth, complete trading fees, and compatible settlement rules for both exchanges. Indicative Polymarket probabilities cannot establish a profitable arbitrage.</p><p>We'll enable results only after these checks are implemented. No picks or estimated profit claims are shown.</p></div></section>}
+      {view === 'predictions' && <section className="panel signalpanel">
+        <div className="panelhead"><div><div className="eyebrow">NFL ANALYTICS · MODEL DEVELOPMENT</div><h2>LineShift Predictions <span className="count">Coming Soon</span></h2></div></div>
+        <div style={{padding: '22px', display: 'grid', gap: 18}}>
+          <div style={{padding: 20, background: '#18252e', border: '1px solid #344554', borderRadius: 10}}>
+            <div className="eyebrow" style={{marginBottom: 10}}>GAME WIN PROBABILITIES</div>
+            <h3 style={{margin: '0 0 10px'}}>NFL Prediction Model</h3>
+            <p className="muted" style={{lineHeight: 1.7}}>We are building a statistical model using historical NFL results and pregame team performance. Win probabilities will appear here only after the model has been trained and evaluated on games it has not seen.</p>
+            <span className="badge">Model not yet trained</span>
+          </div>
+          <div style={{padding: 20, background: '#18252e', border: '1px solid #344554', borderRadius: 10}}>
+            <div className="eyebrow" style={{marginBottom: 10}}>BEST VALUE BETS</div>
+            <h3 style={{margin: '0 0 10px'}}>Odds of -175 or Better</h3>
+            <p className="muted" style={{lineHeight: 1.7}}>Once model probabilities are validated, this section will compare them with available market prices and highlight potential value at American odds of -175 or better. A better price on one exchange alone does not establish a profitable bet.</p>
+            <span className="badge">No model-backed picks available</span>
+          </div>
+          <div style={{padding: 18, border: '1px solid #343a40', borderRadius: 10}}>
+            <div className="eyebrow" style={{marginBottom: 10}}>HOW WE'LL EVALUATE IT</div>
+            <p className="muted" style={{lineHeight: 1.7, margin: 0}}>Out-of-sample testing · Brier score · Probability calibration · Comparison against market-implied probabilities · Price, fees, and liquidity checks. Predictions are estimates, not guarantees.</p>
+          </div>
+        </div>
+      </section>}
       {view === 'markets' && <section className="panel">{!selectedGame ? <><div className="panelhead"><div><div className="eyebrow">MATCHUP EXPLORER</div><h2>Upcoming Matchups <span className="count">{filteredGames.length}</span></h2></div><div className="last">{updated ? `Last updated ${new Date(updated).toLocaleTimeString()}` : 'Waiting for feed'}</div></div><div className="filters"><div className="leagues"><span className="chosen" style={{ display: 'inline-flex', alignItems: 'center', padding: '10px 18px', borderRadius: 8, fontWeight: 700, background: '#b6f36c', color: '#151a13' }}>NFL</span></div><div className="search"><Search size={16} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search teams or matchups" /></div></div>{error && <div className="error"><CircleHelp size={18} /><div><strong>Live feed temporarily unavailable.</strong><div>{error}</div></div></div>}<div className="tablewrap"><table><thead><tr><th>MATCHUP / KICKOFF</th><th>AVAILABLE CONTRACTS</th><th>MARKET TYPES</th><th>EXCHANGE</th></tr></thead><tbody>{filteredGames.map(g => <tr key={g.id} onClick={() => openGame(g)} style={{ cursor: 'pointer' }}><td><div className="marketname">{g.name}</div><div className="marketid" style={{ color: '#b6f36c', marginTop: 8 }}>{formatKickoff(g.kickoff)}</div><div className="marketid">Click to explore markets →</div></td><td className="volume">{g.markets.length.toLocaleString()}</td><td><div className="outcomes">{categories.filter(c => g.markets.some(m => categoryOf(m) === c)).map(c => <span key={c} className="badge">{c}</span>)}</div></td><td className="volume">Polymarket</td></tr>)}</tbody></table>{!loading && !filteredGames.length && <div className="empty"><BarChart3 size={30} /><h3>{error ? 'No live data' : 'No upcoming games found'}</h3><p>{error ? 'Try refreshing later.' : 'Try another search.'}</p></div>}{loading && !games.length && <div className="empty"><RefreshCw size={25} className="spin" /><p>Loading upcoming matchups…</p></div>}</div></> : <><div className="panelhead"><div><button className="backbutton" onClick={() => setSelectedGameId(null)}><ArrowLeft size={16} />Back to matchups</button><div className="eyebrow">{league} MATCHUP DETAILS</div><h2>{selectedGame.name}</h2><p className="muted">{formatKickoff(selectedGame.kickoff)}</p><p className="muted">{selectedGame.markets.length} available contracts · Polymarket</p></div></div><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}><div className="eyebrow">DISPLAY PRICES AS</div><div style={{ display: 'flex', gap: 6, padding: 4, borderRadius: 8, border: '1px solid #343a40', background: '#191d21' }}>{(['probability', 'american'] as OddsFormat[]).map(f => <button key={f} onClick={() => changeOddsFormat(f)} aria-pressed={oddsFormat === f} style={{ padding: '9px 14px', borderRadius: 6, border: 'none', cursor: 'pointer', fontWeight: 600, background: oddsFormat === f ? '#b6f36c' : 'transparent', color: oddsFormat === f ? '#151a13' : '#c7cbd0' }}>{f === 'probability' ? 'Probability %' : 'American Odds'}</button>)}</div></div>
       {category === 'Moneyline' && selectedPeriods.includes('Full Game') && comparisons.some(r => r.game.id === selectedGame.id) && <div style={{ marginBottom: 20, padding: 16, border: '1px solid #343a40', borderRadius: 8, background: '#20262a' }}><div className="eyebrow" style={{ marginBottom: 12 }}>POLYMARKET VS. KALSHI</div><div className="tablewrap"><table><thead><tr><th>TEAM</th><th>POLYMARKET INDICATIVE</th><th>KALSHI YES ASK</th><th>LOWER PRICE</th></tr></thead><tbody>{comparisons.filter(r => r.game.id === selectedGame.id).map(r => <tr key={r.id}><td>{r.team}</td><td>{formatPrice(r.polymarket, oddsFormat)}</td><td>{formatPrice(r.kalshiAsk, oddsFormat)}</td><td>{Math.abs(r.difference) < 0.05 ? 'Tie' : r.difference > 0 ? 'Kalshi' : 'Polymarket'}</td></tr>)}</tbody></table></div></div>}
       <div style={{marginBottom: 18, padding: 16, background: '#18252e', border: '1px solid #344554', borderRadius: 10}}>
