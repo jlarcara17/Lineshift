@@ -38,23 +38,22 @@ function normalizeMatchupName(raw: string) { return raw.replace(/ - (First Touch
 function categoryOf(m: Market): Category { const s = `${m.marketType || ''} ${m.sportsMarketType || ''} ${marketName(m)}`.toLowerCase(); if (/player|passing yards|rushing yards|receiving yards|receptions|touchdown scorer|anytime touchdown|first touchdown|to score a touchdown/.test(s)) return 'Player Props'; if (/spread/.test(s)) return 'Spreads'; if (/total|over\/under|combined points|o\/u/.test(s)) return 'Totals'; if (/moneyline|winner|game winner|who will win/.test(s)) return 'Moneyline'; return 'Other'; }
 // Conservative period classification: never treat an unknown period as a full-game contract.
 function gamePeriod(m: Market): GamePeriod | null {
+  // Check the market title first. Polymarket commonly calls quarters "1Q Spread",
+  // "2Q Total", etc.; these must never be classified as full-game markets.
   const label = `${marketName(m)} ${m.groupItemTitle || ''} ${m.sportsMarketType || ''}`.toLowerCase();
   const slug = (m.eventSlug || '').toLowerCase();
   const text = `${label} ${slug}`;
-  if (/\b(?:1st|first)[ -]?(?:quarter|qtr)\b|\bq1\b/.test(text)) return 'Q1';
-  if (/\b(?:2nd|second)[ -]?(?:quarter|qtr)\b|\bq2\b/.test(text)) return 'Q2';
-  if (/\b(?:3rd|third)[ -]?(?:quarter|qtr)\b|\bq3\b/.test(text)) return 'Q3';
-  if (/\b(?:4th|fourth)[ -]?(?:quarter|qtr)\b|\bq4\b/.test(text)) return 'Q4';
-  if (/\b(?:1st|first)[ -]?half\b|\b1h\b/.test(text)) return 'First Half';
-  if (/\b(?:2nd|second)[ -]?half\b|\b2h\b/.test(text)) return 'Second Half';
-  if (/\b(?:quarter|qtr|half|period|overtime)\b/.test(text)) return null;
-  // Game-level event alone is not proof that a generic "winner" market is full-game.
-  // Require the market to be the main event winner or explicitly say full game.
+  if (/\b(?:1q|q1|1st[ -]?(?:quarter|qtr)|first[ -]?(?:quarter|qtr))\b/.test(text)) return 'Q1';
+  if (/\b(?:2q|q2|2nd[ -]?(?:quarter|qtr)|second[ -]?(?:quarter|qtr))\b/.test(text)) return 'Q2';
+  if (/\b(?:3q|q3|3rd[ -]?(?:quarter|qtr)|third[ -]?(?:quarter|qtr))\b/.test(text)) return 'Q3';
+  if (/\b(?:4q|q4|4th[ -]?(?:quarter|qtr)|fourth[ -]?(?:quarter|qtr))\b/.test(text)) return 'Q4';
+  if (/\b(?:1h|h1|1st[ -]?half|first[ -]?half)\b/.test(text)) return 'First Half';
+  if (/\b(?:2h|h2|2nd[ -]?half|second[ -]?half)\b/.test(text)) return 'Second Half';
+  // Don't silently move unrecognized period-specific markets into Full Game.
+  if (/\b(?:quarter|qtr|half|period|overtime|[1-4]q|q[1-4]|[12]h|h[12])\b/.test(text)) return null;
   const mainEvent = marketName(m).trim().toLowerCase() === (m.eventName || '').trim().toLowerCase();
   if (mainEvent || /\b(?:full[ -]?game|game winner|match winner|final result)\b/.test(label)) return 'Full Game';
-  // Standard game spread/total markets often omit the words 'full game'.
-  // Do not apply this inference to player props or unusual/unrecognized markets.
-  if (categoryOf(m) === 'Spreads' && /\bspread\b/.test(label) && !/\b(?:team total|player|alternate quarter|half)\b/.test(label)) return 'Full Game';
+  if (categoryOf(m) === 'Spreads' && /\bspread\b/.test(label) && !/\b(?:team total|player)\b/.test(label)) return 'Full Game';
   if (categoryOf(m) === 'Totals' && /\b(?:game total|total points|total:|over\/under|o\/u)\b/.test(label) && !/\b(?:team total|player)\b/.test(label)) return 'Full Game';
   return null;
 }
