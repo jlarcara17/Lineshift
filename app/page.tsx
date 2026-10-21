@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, BarChart3, CircleHelp, ExternalLink, RefreshCw, Search, ShieldCheck, TrendingUp, Wifi, WifiOff } from 'lucide-react';
+import { Activity, ArrowLeft, BarChart3, CircleHelp, ExternalLink, RefreshCw, Search, ShieldCheck, TrendingUp, Wifi, WifiOff } from 'lucide-react';
 
 type Tick = { at: number; prob: number };
 type History = Record<string, Tick[]>;
